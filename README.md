@@ -253,5 +253,8 @@ mmfuse/
 MIT License
 
 ## Author
-
+Nishant Killedar
+AI Researcher 
+CSIS Department
+BITS Pilani Hyderabad Campus
 Built for robotic multimodal fusion applications.
