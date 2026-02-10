@@ -260,7 +260,7 @@ class MockStreamingDemo:
             # 6. Decode to robot commands
             result = self.controller.decode(fused)
             position = result['position'].cpu().numpy()[0]
-            gripper_force = result['force'].cpu().item()
+            gripper_force = result['force'].cpu()[0].item()
             
             # 7. Send to mock Arduino
             self.arduino.send_command(
