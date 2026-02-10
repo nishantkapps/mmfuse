@@ -21,11 +21,11 @@ from encoders.sensor_encoder import PressureSensorEncoder, EMGSensorEncoder
 from fusion.multimodal_fusion import MultimodalFusion
 from robotic_arm_controller import RoboticArmController3DOF
 from preprocessing.preprocessor import VisionPreprocessor, AudioPreprocessor
-# Avoid conflict with built-in 'io' module by importing directly from file path
-import sys
-import os
-sys.path.insert(0, os.path.dirname(__file__))
-from io.arduino_controller import ArduinoController, SensorBuffer
+
+# Avoid conflict with built-in 'io' module
+io_path = os.path.join(os.path.dirname(__file__), 'io')
+sys.path.insert(0, io_path)
+from arduino_controller import ArduinoController, SensorBuffer
 
 
 logging.basicConfig(
@@ -191,27 +191,42 @@ class StreamingRobotController:
         
         logger.info(f"✓ Buffers initialized (audio: {self.audio_samples} samples)")
     
-    def run(self, webcam_id: int = 0, duration: Optional[float] = None):
+    def run(self, webcam_ids: list = None, duration: Optional[float] = None):
         """
-        Run the streaming pipeline
+        Run the streaming pipeline with dual cameras
         
         Args:
-            webcam_id: Webcam device ID (usually 0 for default camera)
+            webcam_ids: List of camera IDs [primary, secondary] (e.g., [0, 1])
             duration: Duration to run in seconds (None = infinite)
         """
-        self.running = True
-        cap = cv2.VideoCapture(webcam_id)
+        if webcam_ids is None:
+            webcam_ids = [0, 1]
         
-        if not cap.isOpened():
-            logger.error("Failed to open webcam")
+        # Open both cameras
+        cap_primary = cv2.VideoCapture(webcam_ids[0])
+        cap_secondary = cv2.VideoCapture(webcam_ids[1]) if len(webcam_ids) > 1 else None
+        
+        if not cap_primary.isOpened():
+            logger.error("Failed to open primary camera (ID: {})".format(webcam_ids[0]))
             return
         
-        # Set camera resolution
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.video_resolution[1])
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.video_resolution[0])
-        cap.set(cv2.CAP_PROP_FPS, self.target_fps)
+        if cap_secondary and not cap_secondary.isOpened():
+            logger.warning("Failed to open secondary camera (ID: {}), using primary only".format(webcam_ids[1]))
+            cap_secondary = None
         
-        logger.info(f"Webcam opened: {self.video_resolution[1]}x{self.video_resolution[0]} @ {self.target_fps} Hz")
+        # Set camera properties
+        cap_primary.set(cv2.CAP_PROP_FRAME_WIDTH, self.video_resolution[1])
+        cap_primary.set(cv2.CAP_PROP_FRAME_HEIGHT, self.video_resolution[0])
+        cap_primary.set(cv2.CAP_PROP_FPS, self.target_fps)
+        
+        if cap_secondary:
+            cap_secondary.set(cv2.CAP_PROP_FRAME_WIDTH, self.video_resolution[1])
+            cap_secondary.set(cv2.CAP_PROP_FRAME_HEIGHT, self.video_resolution[0])
+            cap_secondary.set(cv2.CAP_PROP_FPS, self.target_fps)
+        
+        logger.info(f"Webcam 1 opened: {self.video_resolution[1]}x{self.video_resolution[0]} @ {self.target_fps} Hz")
+        if cap_secondary:
+            logger.info(f"Webcam 2 opened: {self.video_resolution[1]}x{self.video_resolution[0]} @ {self.target_fps} Hz")
         
         # Start audio capture thread
         audio_thread = threading.Thread(
@@ -228,7 +243,7 @@ class StreamingRobotController:
         sensor_thread.start()
         
         logger.info("=" * 60)
-        logger.info("STREAMING PIPELINE STARTED")
+        logger.info("STREAMING PIPELINE STARTED (DUAL CAMERA)")
         logger.info("=" * 60)
         
         try:
@@ -236,14 +251,22 @@ class StreamingRobotController:
                 # Control timing
                 loop_start = time.time()
                 
-                # Capture video frame
-                ret, frame = cap.read()
-                if not ret:
-                    logger.warning("Failed to capture frame")
+                # Capture from primary camera
+                ret_primary, frame_primary = cap_primary.read()
+                if not ret_primary:
+                    logger.warning("Failed to capture from primary camera")
                     break
                 
-                # Process frame through pipeline
-                self._process_frame(frame)
+                # Capture from secondary camera if available
+                frame_secondary = None
+                if cap_secondary:
+                    ret_secondary, frame_secondary = cap_secondary.read()
+                    if not ret_secondary:
+                        logger.warning("Failed to capture from secondary camera, continuing with primary only")
+                        frame_secondary = None
+                
+                # Process frames through pipeline
+                self._process_dual_frames(frame_primary, frame_secondary)
                 
                 self.frame_count += 1
                 
@@ -261,7 +284,71 @@ class StreamingRobotController:
             logger.info("Pipeline interrupted by user")
         
         finally:
-            self.stop(cap)
+            self.stop(cap_primary, cap_secondary)
+    
+    def _process_dual_frames(self, frame_primary: np.ndarray, frame_secondary: Optional[np.ndarray] = None):
+        """
+        Process dual frames through pipeline, fusing both vision embeddings
+        
+        Args:
+            frame_primary: Primary camera frame (BGR, 1080p)
+            frame_secondary: Secondary camera frame (BGR, 1080p) or None
+        """
+        with torch.no_grad():
+            # 1. Preprocess and encode primary vision
+            frame_rgb = cv2.cvtColor(frame_primary, cv2.COLOR_BGR2RGB)
+            vision_tensor = self.vision_preprocessor.preprocess(frame_rgb)
+            vision_tensor = vision_tensor.unsqueeze(0).to(self.device)
+            vision_emb_primary = self.vision_encoder(vision_tensor)
+            
+            # 2. Preprocess and encode secondary vision (if available)
+            if frame_secondary is not None:
+                frame_rgb_sec = cv2.cvtColor(frame_secondary, cv2.COLOR_BGR2RGB)
+                vision_tensor_sec = self.vision_preprocessor.preprocess(frame_rgb_sec)
+                vision_tensor_sec = vision_tensor_sec.unsqueeze(0).to(self.device)
+                vision_emb_secondary = self.vision_encoder(vision_tensor_sec)
+                
+                # Average both vision embeddings
+                vision_emb = (vision_emb_primary + vision_emb_secondary) / 2.0
+            else:
+                vision_emb = vision_emb_primary
+            
+            # 3. Encode audio (if buffer ready)
+            audio_emb = self._encode_audio()
+            
+            # 4. Encode sensors (if data available)
+            pressure_emb, emg_emb = self._encode_sensors()
+            
+            # 5. Fuse modalities
+            if audio_emb is not None and pressure_emb is not None:
+                fused = self.fusion({
+                    'vision': vision_emb,
+                    'audio': audio_emb,
+                    'pressure': pressure_emb,
+                    'emg': emg_emb
+                })
+            else:
+                # Fallback: use vision only (or handle gracefully)
+                fused = vision_emb
+            
+            # 6. Decode to robot commands
+            result = self.controller.decode(fused)
+            joint_angles = result['position'].cpu().numpy()[0]
+            gripper_force = result['force'].cpu()[0].item()
+            
+            # 7. Send to Arduino
+            self._send_robot_command(joint_angles, gripper_force)
+            
+            # 8. Log stats periodically
+            if self.frame_count % 60 == 0:  # Log every 60 frames (~1 second at 60 Hz)
+                elapsed = time.time() - self.start_time
+                fps = self.frame_count / elapsed
+                camera_status = "Dual cameras" if frame_secondary is not None else "Single camera"
+                logger.info(
+                    f"Frame {self.frame_count} | FPS: {fps:.1f} | {camera_status} | "
+                    f"Joint angles: ({joint_angles[0]:.1f}°, {joint_angles[1]:.1f}°, {joint_angles[2]:.1f}°) | "
+                    f"Gripper: {gripper_force:.1f}%"
+                )
     
     def _process_frame(self, frame: np.ndarray):
         """
@@ -412,12 +499,15 @@ class StreamingRobotController:
             
             time.sleep(0.01)  # 100 Hz sensor read rate
     
-    def stop(self, cap=None):
+    def stop(self, cap_primary=None, cap_secondary=None):
         """Cleanup and shutdown"""
         self.running = False
         
-        if cap:
-            cap.release()
+        if cap_primary:
+            cap_primary.release()
+        
+        if cap_secondary:
+            cap_secondary.release()
         
         if self.arduino.connected:
             self.arduino.disconnect()
@@ -451,8 +541,9 @@ def main():
     parser.add_argument(
         "--webcam",
         type=int,
-        default=0,
-        help="Webcam device ID"
+        nargs="+",
+        default=[0],
+        help="Webcam device ID(s) - single ID or two IDs for dual camera mode"
     )
     parser.add_argument(
         "--duration",
@@ -469,7 +560,7 @@ def main():
     )
     
     controller.run(
-        webcam_id=args.webcam,
+        webcam_ids=args.webcam,
         duration=args.duration
     )
 

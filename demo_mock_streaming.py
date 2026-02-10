@@ -11,6 +11,7 @@ import numpy as np
 import time
 import logging
 from pathlib import Path
+from typing import Optional
 
 # Add repo root to path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -146,24 +147,42 @@ class MockStreamingDemo:
         self.frame_count = 0
         self.start_time = time.time()
     
-    def run(self, webcam_id: int = 0, save_video: bool = False):
+    def run(self, webcam_ids: list = None, save_video: bool = False):
         """
-        Run the demo
+        Run the demo with single or dual cameras
         
         Args:
-            webcam_id: Webcam device ID
+            webcam_ids: List of camera IDs [primary, secondary] or single ID (e.g., [0] or [0, 1])
             save_video: Whether to save output video
         """
-        cap = cv2.VideoCapture(webcam_id)
+        if webcam_ids is None:
+            webcam_ids = [0]
+        elif isinstance(webcam_ids, int):
+            webcam_ids = [webcam_ids]
         
-        if not cap.isOpened():
-            logger.error("Failed to open webcam")
+        # Open primary camera
+        cap_primary = cv2.VideoCapture(webcam_ids[0])
+        if not cap_primary.isOpened():
+            logger.error(f"Failed to open primary camera (ID: {webcam_ids[0]})")
             return
         
+        # Open secondary camera if specified
+        cap_secondary = None
+        if len(webcam_ids) > 1:
+            cap_secondary = cv2.VideoCapture(webcam_ids[1])
+            if not cap_secondary.isOpened():
+                logger.warning(f"Failed to open secondary camera (ID: {webcam_ids[1]}), using primary only")
+                cap_secondary = None
+        
         # Set camera properties
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-        cap.set(cv2.CAP_PROP_FPS, self.target_fps)
+        cap_primary.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        cap_primary.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        cap_primary.set(cv2.CAP_PROP_FPS, self.target_fps)
+        
+        if cap_secondary:
+            cap_secondary.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+            cap_secondary.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+            cap_secondary.set(cv2.CAP_PROP_FPS, self.target_fps)
         
         # Video writer for output
         writer = None
@@ -177,20 +196,30 @@ class MockStreamingDemo:
             )
         
         logger.info("=" * 70)
-        logger.info("DEMO RUNNING - Press 'q' to quit")
+        camera_info = "Dual cameras" if cap_secondary else "Single camera"
+        logger.info(f"DEMO RUNNING ({camera_info}) - Press 'q' to quit")
         logger.info("=" * 70 + "\n")
         
         try:
             while self.frame_count < int(self.duration * self.target_fps):
                 loop_start = time.time()
                 
-                ret, frame = cap.read()
-                if not ret:
-                    logger.warning("Failed to capture frame")
+                # Capture from primary camera
+                ret_primary, frame_primary = cap_primary.read()
+                if not ret_primary:
+                    logger.warning("Failed to capture frame from primary camera")
                     break
                 
-                # Process frame
-                frame_output = self._process_frame(frame.copy())
+                # Capture from secondary camera if available
+                frame_secondary = None
+                if cap_secondary:
+                    ret_secondary, frame_secondary = cap_secondary.read()
+                    if not ret_secondary:
+                        logger.debug("Failed to capture from secondary camera, using primary only")
+                        frame_secondary = None
+                
+                # Process frames
+                frame_output = self._process_dual_frames(frame_primary.copy(), frame_secondary.copy() if frame_secondary is not None else None)
                 
                 # Display
                 cv2.imshow('Mock Streaming Demo', frame_output)
@@ -211,26 +240,37 @@ class MockStreamingDemo:
                     time.sleep(self.frame_time - loop_time)
         
         finally:
-            self._cleanup(cap, writer)
+            self._cleanup(cap_primary, writer, cap_secondary)
     
-    def _process_frame(self, frame: np.ndarray) -> np.ndarray:
+    def _process_dual_frames(self, frame_primary: np.ndarray, frame_secondary: Optional[np.ndarray] = None) -> np.ndarray:
         """
-        Process frame through ML pipeline
+        Process dual frames through ML pipeline with vision fusion
         
         Args:
-            frame: Input video frame (BGR, 1080p)
+            frame_primary: Primary video frame (BGR, 1080p)
+            frame_secondary: Secondary video frame (BGR, 1080p) or None
         
         Returns:
             Annotated frame with overlay info
         """
         with torch.no_grad():
-            # 1. Preprocess vision
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # 1. Preprocess and encode primary vision
+            frame_rgb = cv2.cvtColor(frame_primary, cv2.COLOR_BGR2RGB)
             vision_tensor = self.vision_preprocessor.preprocess(frame_rgb)
             vision_tensor = vision_tensor.unsqueeze(0).to(self.device)
+            vision_emb_primary = self.vision_encoder(vision_tensor)
             
-            # 2. Encode vision
-            vision_emb = self.vision_encoder(vision_tensor)
+            # 2. Preprocess and encode secondary vision (if available)
+            if frame_secondary is not None:
+                frame_rgb_sec = cv2.cvtColor(frame_secondary, cv2.COLOR_BGR2RGB)
+                vision_tensor_sec = self.vision_preprocessor.preprocess(frame_rgb_sec)
+                vision_tensor_sec = vision_tensor_sec.unsqueeze(0).to(self.device)
+                vision_emb_secondary = self.vision_encoder(vision_tensor_sec)
+                
+                # Average both vision embeddings
+                vision_emb = (vision_emb_primary + vision_emb_secondary) / 2.0
+            else:
+                vision_emb = vision_emb_primary
             
             # 3. Generate dummy audio (in real scenario, this comes from live audio capture)
             dummy_audio = np.random.randn(2, 40000).astype(np.float32)
@@ -324,9 +364,12 @@ class MockStreamingDemo:
         
         return frame
     
-    def _cleanup(self, cap, writer):
+    def _cleanup(self, cap_primary, writer, cap_secondary=None):
         """Clean up resources"""
-        cap.release()
+        cap_primary.release()
+        if cap_secondary:
+            cap_secondary.release()
+        
         if writer:
             writer.release()
         
@@ -367,8 +410,9 @@ def main():
     parser.add_argument(
         "--webcam",
         type=int,
-        default=0,
-        help="Webcam device ID"
+        nargs="+",
+        default=[0],
+        help="Webcam device ID(s) - single ID or two IDs for dual camera mode"
     )
     parser.add_argument(
         "--device",
@@ -390,7 +434,7 @@ def main():
     )
     
     demo.run(
-        webcam_id=args.webcam,
+        webcam_ids=args.webcam,
         save_video=args.save_video
     )
 
