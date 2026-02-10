@@ -1,21 +1,25 @@
 # Core ML Libraries
 # PyTorch - choose ONE based on your HPC setup:
 
-# For CPU-only (development/testing)
-# torch==2.10.0
-# torchvision==0.11.0
+# For CUDA 12.5 (cu125) - RECOMMENDED FOR LATEST HARDWARE
+torch==2.4.1+cu125
+torchvision==0.19.1+cu125
 
-# For CUDA 11.8 (cu118)
-torch==2.10.0+cu118
-torchvision==0.11.0+cu118
+# For CUDA 12.4 (cu124)
+# torch==2.4.1+cu124
+# torchvision==0.19.1+cu124
 
 # For CUDA 12.1 (cu121)
 # torch==2.10.0+cu121
 # torchvision==0.11.0+cu121
 
-# For CUDA 12.4/12.5 (cu124/cu125)
-# torch==2.4.1+cu124
-# torchvision==0.19.1+cu124
+# For CUDA 11.8 (cu118)
+# torch==2.10.0+cu118
+# torchvision==0.11.0+cu118
+
+# For CPU-only (development/testing)
+# torch==2.10.0
+# torchvision==0.11.0
 
 # Audio Processing
 librosa==0.10.0
