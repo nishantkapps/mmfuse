@@ -37,3 +37,15 @@ open-clip-torch==2.24.0
 scipy==1.11.4
 matplotlib==3.8.2
 tqdm==4.66.1
+
+# Video and image processing
+opencv-python==4.8.1.78
+
+# Arduino & Serial Communication
+pyserial==3.5
+
+# Configuration
+pyyaml==6.0
+
+# Audio capture
+sounddevice==0.4.6

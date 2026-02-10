@@ -37,13 +37,15 @@ class SensorEncoder(nn.Module):
         self.output_dim = output_dim
         
         # Multi-layer network for encoding
+        # Use LayerNorm instead of BatchNorm so the encoder works with
+        # batch_size == 1 (common in inference / single-sample tests)
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, output_dim)

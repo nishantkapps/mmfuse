@@ -149,7 +149,21 @@ class AudioEncoder(nn.Module):
         audio = audio / (max_val + 1e-8)
         
         # Add channel dimension: (batch_size, num_samples) -> (batch_size, 1, num_samples)
-        audio = audio.unsqueeze(1).to(self.device)
+        audio = audio.unsqueeze(1)
+
+        # Ensure model parameters live on the same device as the input to avoid
+        # "Input type (torch.cuda.FloatTensor) and weight type (torch.FloatTensor)"
+        # runtime errors when caller moves tensors to CUDA but the module remained on CPU.
+        target_device = audio.device
+        try:
+            param_device = next(self.parameters()).device
+        except StopIteration:
+            param_device = None
+
+        if param_device != target_device:
+            self.to(target_device)
+
+        audio = audio.to(target_device)
         
         # Conv layers: (batch, 1, num_samples) -> (batch, num_filters, seq_len)
         features = self.conv_layers(audio)

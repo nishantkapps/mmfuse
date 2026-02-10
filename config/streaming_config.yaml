@@ -1,0 +1,83 @@
+# Streaming Robot Control Configuration
+# For real-time multimodal robotic arm control
+
+# Streaming Parameters
+streaming:
+  target_fps: 60
+  audio_buffer_duration: 2.5  # seconds (can adjust 2.0-3.0)
+  audio_sample_rate: 16000
+  video_resolution: [1080, 1920]  # [height, width] for 1080p HD
+  frame_skip: 1  # Process every N frames (1 = all frames)
+
+# Arduino Configuration
+arduino:
+  port: null  # Will be auto-detected or set to /dev/ttyUSB0, COM3, etc.
+  baud_rate: 115200
+  timeout: 0.1  # seconds
+  write_delay: 0.01  # seconds between writes
+
+# Sensor Pins on Arduino Uno
+sensor_pins:
+  # Pressure Sensor (Analog Input)
+  pressure:
+    pin: "A0"
+    type: "analog"
+    channels: 1
+    read_interval: 0.016  # 60 Hz = 1/60
+
+  # EMG Sensors (Analog Inputs)
+  emg:
+    pin: ["A1", "A2", "A3"]  # Up to 3 EMG channels
+    type: "analog"
+    channels: 3
+    read_interval: 0.016
+
+# Motor Control
+motors:
+  count: 3
+  pins:
+    - pin: 3   # Motor 1 (PWM pin)
+      type: "pwm"
+      min_angle: -90
+      max_angle: 90
+    - pin: 5   # Motor 2 (PWM pin)
+      type: "pwm"
+      min_angle: -90
+      max_angle: 90
+    - pin: 6   # Motor 3 (PWM pin)
+      type: "pwm"
+      min_angle: 0
+      max_angle: 180
+  servo_command_format: "MOVE:{j1},{j2},{j3},{grip}\n"  # j1, j2, j3, gripper_force
+
+# Encoder Models
+encoders:
+  vision:
+    model: "ViT-B-32"
+    input_size: [224, 224]
+  audio:
+    model: "wav2vec2"  # or "learnable"
+    input_duration: 2.5
+  pressure:
+    output_dim: 256
+  emg:
+    output_dim: 256
+
+# Fusion Settings
+fusion:
+  method: "weighted_sum"  # concat_project, weighted_sum, bilinear
+  output_dim: 512
+
+# Logging & Monitoring
+logging:
+  enable: true
+  log_file: "logs/streaming_control.log"
+  log_frequency: 10  # Log every N frames
+  verbose: false
+
+# Performance
+performance:
+  use_gpu: true
+  gpu_device: 0
+  num_worker_threads: 4
+  profiling_enabled: false

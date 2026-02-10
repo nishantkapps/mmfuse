@@ -75,20 +75,47 @@ class AudioEncoder(nn.Module):
             Use mean pooling across sequence dimension for fixed-size embedding
         """
         sr = sampling_rate or self.sampling_rate
-        
+
+        # Normalize input shape to (batch, sequence_length)
+        # Accepts: 1D (num_samples,), 2D (batch, num_samples), or higher dims
+        if isinstance(audio, torch.Tensor):
+            # Collapse all leading dims into batch dimension except the last (time) dim
+            if audio.dim() == 1:
+                audio_list = [audio.cpu().numpy()]
+            else:
+                if audio.dim() > 2:
+                    batch = int(torch.prod(torch.tensor(audio.shape[:-1])).item())
+                    audio = audio.reshape(batch, audio.shape[-1])
+                # convert to numpy list per example
+                audio_list = [a.cpu().numpy() for a in audio]
+        elif isinstance(audio, np.ndarray):
+            if audio.ndim == 1:
+                audio_list = [audio]
+            else:
+                if audio.ndim > 2:
+                    batch = int(np.prod(audio.shape[:-1]))
+                    audio = audio.reshape(batch, audio.shape[-1])
+                audio_list = [a for a in audio]
+        elif isinstance(audio, list):
+            audio_list = audio
+        else:
+            raise TypeError(f"Unsupported audio type: {type(audio)}")
+
         with torch.no_grad():
-            # Process audio inputs
+            # Use processor on list of 1D arrays (or Python floats)
             inputs = self.processor(
-                audio,
+                audio_list,
                 sampling_rate=sr,
                 return_tensors="pt",
                 padding=True
-            ).to(self.device)
-            
+            )
+            # Move tensors to device
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
             # Get audio features
             outputs = self.model(**inputs)
             last_hidden_state = outputs.last_hidden_state
-        
+
         return last_hidden_state
     
     def encode(
