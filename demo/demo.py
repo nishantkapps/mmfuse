@@ -5,6 +5,11 @@ Example usage and demo of the Robotic Multimodal Feedback System
 import torch
 import numpy as np
 from pathlib import Path
+import sys
+import os
+
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from robotic_feedback_system import RoboticFeedbackSystem
 

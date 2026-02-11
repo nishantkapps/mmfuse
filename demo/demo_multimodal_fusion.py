@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 # Add root to path
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from encoders.vision_encoder import VisionEncoder
 from encoders.audio_encoder_learnable import AudioEncoder

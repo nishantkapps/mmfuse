@@ -7,6 +7,11 @@ import torch
 import torch.nn as nn
 from typing import Dict, Optional, Tuple, Union
 import numpy as np
+import sys
+import os
+
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from encoders.vision_encoder import VisionEncoder
 from encoders.audio_encoder import AudioEncoder

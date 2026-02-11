@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 # Add repo root to path
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from encoders.vision_encoder import VisionEncoder
 from encoders.audio_encoder_learnable import AudioEncoder as LearnableAudioEncoder
@@ -24,7 +24,7 @@ from robotic_arm_controller import RoboticArmController3DOF
 from preprocessing.preprocessor import VisionPreprocessor, AudioPreprocessor
 
 # Avoid conflict with built-in 'io' module
-io_path = os.path.join(os.path.dirname(__file__), 'io')
+io_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'io')
 sys.path.insert(0, io_path)
 from mock_arduino_controller import MockArduinoController
 
