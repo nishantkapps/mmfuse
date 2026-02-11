@@ -1,0 +1,14 @@
+{
+  "trial_id": "T0001",
+  "start_time": 1770806742.081232,
+  "duration": 20.0,
+  "camera_primary": "./dataset/V01/S01/T0001/cam1.mp4",
+  "camera_secondary": "./dataset/V01/S01/T0001/cam2.mp4",
+  "audio": "./dataset/V01/S01/T0001/mic.wav",
+  "audio_speech": "./dataset/V01/S01/T0001/mic_speech.wav",
+  "audio_ambient": "./dataset/V01/S01/T0001/mic_ambient.wav",
+  "robot_log": "./dataset/V01/S01/T0001/robot.csv",
+  "pressure_log": "./dataset/V01/S01/T0001/pressure.csv",
+  "emg_log": "./dataset/V01/S01/T0001/emg.csv",
+  "notes": ""
+}

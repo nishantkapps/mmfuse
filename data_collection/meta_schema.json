@@ -1,0 +1,15 @@
+{
+  "trial_id": "string",
+  "volunteer_id": "string",
+  "session_id": "string",
+  "start_time": "ISO8601 timestamp",
+  "duration": "seconds",
+  "camera": {"path":"string", "fps":30, "resolution":"1920x1080"},
+  "audio": "path/to/wav",
+  "robot_log": "path/to/csv",
+  "sensors": ["path/to/csv"],
+  "command_text": "transcript string",
+  "intent_label": "label",
+  "assistance_level": "none|light|moderate|full",
+  "notes": "optional notes"
+}

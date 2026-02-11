@@ -205,34 +205,54 @@ class MultimodalFusionWithAttention(nn.Module):
             nn.Linear(fusion_dim * 2, fusion_dim)
         )
     
-    def forward(self, embeddings: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def forward(self, embeddings: Dict[str, torch.Tensor], return_kl: bool = True) -> Tuple[torch.Tensor, dict]:
         """
-        Fuse with cross-modal attention
+        Fuse with cross-modal attention and compute KL divergence for knowledge distillation.
         
         Args:
             embeddings: Dictionary of embeddings from each modality
+            return_kl: Whether to return KL divergence values (default True)
         
         Returns:
-            Fused embedding of shape (batch_size, fusion_dim)
+            Tuple of (fused embedding, dict of KL divergences)
         """
         # Project embeddings
         projected = {}
         for modality, embedding in embeddings.items():
             projected[modality] = self.projections[modality](embedding)
         
-        # Stack embeddings for attention
+        # --- Knowledge Distillation (KL Divergence) ---
+        kl_losses = {}
+        # Camera modalities: look for keys containing 'camera' or 'vision'
+        camera_keys = [k for k in projected if 'camera' in k or 'vision' in k]
+        if len(camera_keys) == 2:
+            cam1, cam2 = camera_keys
+            p1 = torch.log_softmax(projected[cam1], dim=-1)
+            p2 = torch.softmax(projected[cam2], dim=-1)
+            kl_cam = torch.nn.functional.kl_div(p1, p2, reduction='batchmean')
+            kl_losses['kl_camera'] = kl_cam
+        # Text/Audio modalities
+        text_keys = [k for k in projected if 'text' in k]
+        audio_keys = [k for k in projected if 'audio' in k]
+        if text_keys and audio_keys:
+            text_key = text_keys[0]
+            audio_key = audio_keys[0]
+            p1 = torch.log_softmax(projected[text_key], dim=-1)
+            p2 = torch.softmax(projected[audio_key], dim=-1)
+            kl_text_audio = torch.nn.functional.kl_div(p1, p2, reduction='batchmean')
+            kl_losses['kl_text_audio'] = kl_text_audio
+        
+        # --- N-way cross alignment (cross-modal attention) ---
         modality_names = sorted(projected.keys())
         stacked = torch.stack(
             [projected[name] for name in modality_names],
             dim=1
         )  # (batch_size, num_modalities, fusion_dim)
-        
-        # Apply self-attention across modalities
         attended, _ = self.attention(stacked, stacked, stacked)
-        
-        # Flatten and project
         batch_size = attended.size(0)
         flattened = attended.reshape(batch_size, -1)
         fused = self.fusion_mlp(flattened)
-        
-        return fused
+        if return_kl:
+            return fused, kl_losses
+        else:
+            return fused

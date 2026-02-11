@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from encoders.vision_encoder import VisionEncoder
 from encoders.audio_encoder import AudioEncoder
+from encoders.text_encoder import TextEncoder
 from encoders.sensor_encoder import PressureSensorEncoder, EMGSensorEncoder
 from fusion.multimodal_fusion import MultimodalFusion, MultimodalFusionWithAttention
 from preprocessing.preprocessor import (
@@ -91,14 +92,23 @@ class RoboticFeedbackSystem(nn.Module):
         ).to(device)
         emg_dim = self.emg_encoder.output_dim_value
         
+        # ===== Text Encoder (for command text) =====
+        self.text_encoder = TextEncoder(
+            model_name='bert-base-uncased',
+            output_dim=fusion_dim,
+            device=device
+        )
+        text_dim = fusion_dim
+
         # ===== Initialize Fusion =====
         modality_dims = {
             'vision': vision_dim,
             'audio': audio_dim,
+            'text': text_dim,
             'pressure': pressure_dim,
             'emg': emg_dim
         }
-        
+
         if use_attention:
             self.fusion_module = MultimodalFusionWithAttention(
                 modality_dims=modality_dims,
@@ -137,6 +147,7 @@ class RoboticFeedbackSystem(nn.Module):
         audio: torch.Tensor,
         pressure: torch.Tensor,
         emg: torch.Tensor,
+        command_texts: list = None,
         return_modality_embeddings: bool = False
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
         """
@@ -176,6 +187,19 @@ class RoboticFeedbackSystem(nn.Module):
                 pooling="mean"
             )  # (batch, audio_dim)
         embeddings['audio'] = audio_embedding
+
+        # ===== Process Text (from audio-to-text conversion) =====
+        # Plug: Insert your audio-to-text conversion here
+        # If command_texts is None, you can call your ASR pipeline here
+        # Example:
+        #   command_texts = my_asr_pipeline(audio)
+        # For now, expects command_texts as a list of strings (batch)
+        if command_texts is None:
+            # Placeholder: pass empty string for each sample
+            command_texts = ["Move Left"] * audio.shape[0]
+        with torch.no_grad():
+            text_embedding = self.text_encoder(command_texts)
+        embeddings['text'] = text_embedding
         
         # ===== Process Pressure Sensor =====
         # Extract temporal features from pressure signal
@@ -243,6 +267,7 @@ class RoboticFeedbackSystem(nn.Module):
         return {
             'vision': self.vision_encoder.output_dim,
             'audio': self.audio_encoder.output_dim,
+            'text': self.text_encoder.output_dim,
             'pressure': self.pressure_encoder.output_dim_value,
             'emg': self.emg_encoder.output_dim_value,
             'fused': self.fusion_dim

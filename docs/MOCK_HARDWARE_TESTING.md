@@ -97,45 +97,43 @@ emg[i] = baseline_emg[i] + motor_activity[i] * 100 +
 
 ## API Reference
 
-### MockArduinoController
+### Arduino Controller (recommended: use factory)
+
+Use the factory `create_arduino_controller()` to select mock vs real hardware from configuration or explicitly via `mock_mode`.
 
 ```python
-from io.mock_arduino_controller import MockArduinoController
+from io.mock_arduino_controller import create_arduino_controller
 
-# Initialize
-arduino = MockArduinoController(noise_level=0.1)
+# Create based on config (config/streaming_config.yaml -> arduino.mode)
+arduino = create_arduino_controller(noise_level=0.1)
 
-# Connect
+# Or explicitly request mock or real
+# Mock (testing):
+arduino = create_arduino_controller(mock_mode=True, noise_level=0.1)
+
+# Real (requires port):
+# arduino = create_arduino_controller(mock_mode=False, port='/dev/ttyUSB0')
+
 arduino.connect()
 
 # Send motor command
 arduino.send_command(
-    angle1=45.0,      # Joint 1 angle (degrees)
-    angle2=30.0,      # Joint 2 angle (degrees)
-    angle3=60.0,      # Joint 3 angle (degrees)
-    gripper_force=50.0 # Gripper force (0-100%)
+   angle1=45.0,      # Joint 1 angle (degrees)
+   angle2=30.0,      # Joint 2 angle (degrees)
+   angle3=60.0,      # Joint 3 angle (degrees)
+   gripper_force=50.0 # Gripper force (0-100%)
 )
 
-# Read simulated sensors
+# Read sensors
 sensors = arduino.read_sensors()
-# Returns: {'pressure': float, 'emg_1': float, 'emg_2': float, 'emg_3': float}
 
-# Get internal state
-state = arduino.get_simulation_state()
-# Returns: {
-#   'motor_angles': [j1, j2, j3],
-#   'gripper_force': float,
-#   'pressure': float,
-#   'emg': [ch1, ch2, ch3],
-#   'commands_sent': int
-# }
-
-# Get status
+# Get status / disconnect
 status = arduino.get_status()
-
-# Disconnect
 arduino.disconnect()
 ```
+
+Notes:
+- The underlying `MockArduinoController` class remains available for direct instantiation in unit tests or advanced scenarios, but using the factory centralizes configuration and makes demos/config-driven switches easier.
 
 ## Testing Workflow
 

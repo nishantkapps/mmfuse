@@ -6,6 +6,7 @@ Simulates sensor readings and motor outputs for pipeline validation
 import torch
 import numpy as np
 import threading
+import os
 import time
 import logging
 from typing import Optional, Dict, Tuple
@@ -186,21 +187,56 @@ class MockArduinoController:
         }
 
 
-def create_arduino_controller(mock_mode: bool = False, **kwargs) -> any:
+def create_arduino_controller(mock_mode: bool = None, **kwargs) -> any:
     """
-    Factory function to create either real or mock Arduino controller
-    
-    Args:
-        mock_mode: If True, return MockArduinoController, else real ArduinoController
-        **kwargs: Arguments passed to controller constructor
-    
-    Returns:
-        ArduinoController or MockArduinoController instance
+    Factory function to create either real or mock Arduino controller.
+
+    Behavior:
+    - If `mock_mode` is explicitly provided (True/False), respects it.
+    - If `mock_mode` is None, attempts to read `config/streaming_config.yaml` and
+      determine mode from `arduino.mode` ("mock" or "real"). Falls back to mock.
+
+    **kwargs are forwarded to the chosen controller constructor.
     """
+    # Lazy import of config loader to avoid circular imports
+    if mock_mode is None:
+        try:
+            # Load YAML directly to avoid import name collisions with module 'config.py'
+            import yaml
+            repo_root = os.path.dirname(os.path.dirname(__file__))
+            cfg_path = os.path.join(repo_root, 'config', 'streaming_config.yaml')
+            if os.path.exists(cfg_path):
+                with open(cfg_path, 'r') as f:
+                    cfg = yaml.safe_load(f)
+            else:
+                cfg = {}
+
+            mode = cfg.get('arduino', {}).get('mode', 'mock')
+            mock_mode = True if str(mode).lower() == 'mock' else False
+            # Merge default args from config if not provided explicitly
+            ar_cfg = cfg.get('arduino', {})
+            if 'port' in ar_cfg and kwargs.get('port', None) is None:
+                kwargs['port'] = ar_cfg.get('port')
+            if 'baud_rate' in ar_cfg and kwargs.get('baud_rate', None) is None:
+                kwargs['baud_rate'] = ar_cfg.get('baud_rate')
+            if 'timeout' in ar_cfg and kwargs.get('timeout', None) is None:
+                kwargs['timeout'] = ar_cfg.get('timeout')
+            if 'write_delay' in ar_cfg and kwargs.get('write_delay', None) is None:
+                kwargs['write_delay'] = ar_cfg.get('write_delay')
+        except Exception:
+            logger.warning("Could not load streaming config; defaulting to mock Arduino")
+            mock_mode = True
+
     if mock_mode:
         logger.info("Using MOCK Arduino controller (no hardware required)")
-        return MockArduinoController(**kwargs)
+        # Only pass parameters that MockArduinoController accepts
+        allowed_keys = ['baud_rate', 'timeout', 'noise_level']
+        mock_kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
+        return MockArduinoController(**mock_kwargs)
     else:
         from io.arduino_controller import ArduinoController
         logger.info("Using REAL Arduino controller (hardware required)")
-        return ArduinoController(**kwargs)
+        # Only pass parameters that ArduinoController accepts
+        allowed_keys = ['port', 'baud_rate', 'timeout', 'write_delay']
+        real_kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
+        return ArduinoController(**real_kwargs)

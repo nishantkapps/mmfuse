@@ -1,0 +1,15 @@
+Data Collection Consent (sample)
+
+Participant ID: ___________
+
+Purpose: Multimodal data collection to develop assistive robotics for physiotherapy. Participation is voluntary.
+
+Procedures: You will be asked to perform or be assisted through a set of guided movements while video, audio, and sensor data are recorded. A clinician will be present at all times.
+
+Risks: Minimal physical risk; clinician will stop if discomfort occurs. You may withdraw at any time.
+
+Data use: Collected data will be used for algorithm development and research. Personal identifiers will be removed.
+
+Signature: ____________________  Date: _______
+
+(Use institutionally-vetted consent forms where required.)

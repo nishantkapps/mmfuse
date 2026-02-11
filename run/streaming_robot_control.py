@@ -19,18 +19,13 @@ import os
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from encoders.vision_encoder import VisionEncoder
 from encoders.audio_encoder_learnable import AudioEncoder as LearnableAudioEncoder
 from encoders.sensor_encoder import PressureSensorEncoder, EMGSensorEncoder
 from fusion.multimodal_fusion import MultimodalFusion
-from robotic_arm_controller import RoboticArmController3DOF
+from mmfuse.ctrl.robotic_arm_controller import RoboticArmController3DOF
 from preprocessing.preprocessor import VisionPreprocessor, AudioPreprocessor
-
-# Avoid conflict with built-in 'io' module
-io_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'io')
-sys.path.insert(0, io_path)
-from arduino_controller import ArduinoController, SensorBuffer
+from mmfuse.io.arduino_controller import ArduinoController, SensorBuffer
 
 
 logging.basicConfig(
@@ -207,6 +202,8 @@ class StreamingRobotController:
         if webcam_ids is None:
             webcam_ids = [0, 1]
         
+        logger.info(f"Requested webcam IDs: {webcam_ids}")
+        
         # Open both cameras
         cap_primary = cv2.VideoCapture(webcam_ids[0])
         cap_secondary = cv2.VideoCapture(webcam_ids[1]) if len(webcam_ids) > 1 else None
@@ -251,6 +248,7 @@ class StreamingRobotController:
         logger.info("STREAMING PIPELINE STARTED (DUAL CAMERA)")
         logger.info("=" * 60)
         
+        self.running = True
         try:
             while self.running:
                 # Control timing

@@ -11,6 +11,7 @@ streaming:
 
 # Arduino Configuration
 arduino:
+  mode: "mock"  # 'mock' or 'real'
   port: null  # Will be auto-detected or set to /dev/ttyUSB0, COM3, etc.
   baud_rate: 115200
   timeout: 0.1  # seconds
