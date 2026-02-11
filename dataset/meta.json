@@ -1,0 +1,14 @@
+{
+  "trial_id": "dataset",
+  "start_time": 1770814469.3876662,
+  "duration": 30.0,
+  "camera_primary": "/home/nishant/projects/mmfuse/dataset/cam1.mp4",
+  "camera_secondary": "/home/nishant/projects/mmfuse/dataset/cam2.mp4",
+  "audio": "/home/nishant/projects/mmfuse/dataset/mic.wav",
+  "audio_speech": "/home/nishant/projects/mmfuse/dataset/mic_speech.wav",
+  "audio_ambient": "/home/nishant/projects/mmfuse/dataset/mic_ambient.wav",
+  "robot_log": "/home/nishant/projects/mmfuse/dataset/robot.csv",
+  "pressure_log": "/home/nishant/projects/mmfuse/dataset/pressure.csv",
+  "emg_log": "/home/nishant/projects/mmfuse/dataset/emg.csv",
+  "notes": ""
+}
