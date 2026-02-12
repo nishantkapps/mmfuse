@@ -41,3 +41,7 @@ sounddevice==0.4.6
 
 # Optional ASR
 vosk==0.3.64
+
+# Optional: Model visualization
+# torchviz, graphviz       # for tools/visualize_model_architecture.py
+# visualtorch              # for tools/generate_paper_diagram.py
