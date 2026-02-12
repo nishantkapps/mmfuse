@@ -1,0 +1,19 @@
+{
+  "trial_id": "T0001",
+  "folder_path": "/home/nishant/projects/mmfuse/dataset/V01/P001/S01/L_bright/A_grasp/T0001",
+  "volunteer_id": "1",
+  "session_id": "1",
+  "lighting": "bright",
+  "action": "grasp",
+  "start_time": 1770900390.3672056,
+  "duration": 15.0,
+  "camera_primary": "/home/nishant/projects/mmfuse/dataset/V01/P001/S01/L_bright/A_grasp/T0001/cam1.mp4",
+  "camera_secondary": "/home/nishant/projects/mmfuse/dataset/V01/P001/S01/L_bright/A_grasp/T0001/cam2.mp4",
+  "audio": "/home/nishant/projects/mmfuse/dataset/V01/P001/S01/L_bright/A_grasp/T0001/mic.wav",
+  "audio_speech": "/home/nishant/projects/mmfuse/dataset/V01/P001/S01/L_bright/A_grasp/T0001/mic_speech.wav",
+  "audio_ambient": "/home/nishant/projects/mmfuse/dataset/V01/P001/S01/L_bright/A_grasp/T0001/mic_ambient.wav",
+  "robot_log": "/home/nishant/projects/mmfuse/dataset/V01/P001/S01/L_bright/A_grasp/T0001/robot.csv",
+  "pressure_log": "/home/nishant/projects/mmfuse/dataset/V01/P001/S01/L_bright/A_grasp/T0001/pressure.csv",
+  "emg_log": "/home/nishant/projects/mmfuse/dataset/V01/P001/S01/L_bright/A_grasp/T0001/emg.csv",
+  "notes": ""
+}

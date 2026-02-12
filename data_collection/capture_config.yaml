@@ -1,0 +1,47 @@
+# Configuration for data_collection/capture_demo.py
+# Defines folder structure for organizing captures by participant, lighting, action, etc.
+
+# Folder structure pattern (Python format string).
+# Available tokens: version, participant, session, lighting, action, trial
+# - version:   dataset version (e.g. V01)
+# - participant: participant/volunteer ID (e.g. P001)
+# - session:   session number for same participant (e.g. S01)
+# - lighting:  lighting condition (e.g. bright, dim, natural)
+# - action:    action/movement performed (e.g. reach, grasp, pick_place)
+# - trial:    trial number, auto-incremented per (participant,session,lighting,action)
+#
+# Example patterns:
+#   Full:  "V{version:02d}/P{participant:03d}/S{session:02d}/L_{lighting}/A_{action}/T{trial:04d}"
+#   Simple: "V{version:02d}/P{participant:03d}/T{trial:04d}"
+pattern: "V{version:02d}/P{participant:03d}/S{session:02d}/L_{lighting}/A_{action}/T{trial:04d}"
+
+# Defaults when CLI args are not provided
+defaults:
+  version: 1
+  participant: 1
+  session: 1
+  lighting: default
+  action: unspecified
+
+# Base directory (relative to repo root, or absolute path)
+base_dir: dataset
+
+# Optional: predefined choices for CLI prompts (leave empty to allow free text)
+# When set, capture_demo can offer these as options
+choices:
+  lighting:
+    - default
+    - bright
+    - dim
+    - natural
+    - artificial
+  action:
+    - unspecified
+    - reach
+    - grasp
+    - pick_place
+    - release
+    - move_left
+    - move_right
+    - move_up
+    - move_down

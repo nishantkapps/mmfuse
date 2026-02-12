@@ -4,4 +4,6 @@ python -m mmfuse.demo.demo_mock_streaming --webcam 0 1 --use-mic --mic-device "U
 
 python capture_demo.py --out /home/nishant/projects/mmfuse/dataset
 
+python capture_demo.py --participant 1 --lighting bright --action grasp --duration 10
+
 
