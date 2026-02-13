@@ -27,7 +27,9 @@ io_path = os.path.join(os.path.dirname(__file__), 'io')
 sys.path.insert(0, io_path)
 from mock_arduino_controller import MockArduinoController
 
+import serial
 
+ser = serial.Serial('COM3', 115200, timeout=0.01)
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] %(levelname)s: %(message)s'
@@ -66,7 +68,7 @@ class MockStreamingDemo:
         logger.info("MOCK STREAMING ROBOT CONTROL DEMO")
         logger.info("=" * 70)
         logger.info(f"Duration: {duration}s | Target FPS: {target_fps} | Device: {device}\n")
-        
+        self.last_pressure = 0.0
         # Initialize components
         self._init_encoders()
         self._init_preprocessors()
@@ -238,16 +240,26 @@ class MockStreamingDemo:
             audio_emb = self.audio_encoder(audio_tensor)
             
             # 4. Read simulated sensors from mock Arduino
-            sensor_data = self.arduino.read_sensors()
-            if sensor_data:
-                pressure_features = torch.randn(1, 100).to(self.device)
-                emg_features = torch.randn(1, 100).to(self.device)
-                
-                pressure_emb = self.pressure_encoder(pressure_features)
-                emg_emb = self.emg_encoder(emg_features)
-            else:
-                pressure_emb = torch.randn(1, 256).to(self.device)
-                emg_emb = torch.randn(1, 256).to(self.device)
+            pressure_value = self.last_pressure
+            if ser.in_waiting:
+                line = ser.readline().decode(errors="ignore").strip()
+
+                if line:
+                    print("RAW SERIAL:", line)
+                    try:
+                        self.last_pressure = float(line)
+                    except ValueError:
+                        pass
+
+            pressure_value = self.last_pressure
+
+            pressure_features = torch.tensor(
+    [[pressure_value] * 100],
+    dtype=torch.float32
+).to(self.device)
+            pressure_emb = self.pressure_encoder(pressure_features)
+            emg_features = torch.randn(1, 100).to(self.device)
+            emg_emb = self.emg_encoder(emg_features)
             
             # 5. Fuse modalities
             fused = self.fusion({
@@ -256,7 +268,7 @@ class MockStreamingDemo:
                 'pressure': pressure_emb,
                 'emg': emg_emb
             })
-            
+        
             # 6. Decode to robot commands
             result = self.controller.decode(fused)
             position = result['position'].cpu().numpy()[0]
@@ -269,9 +281,11 @@ class MockStreamingDemo:
                 angle3=position[2] * 180,
                 gripper_force=gripper_force
             )
+            ser.write(f"Position1: {position[0] * 1000}\nPosition2: {position[1] * 1000}\n".encode())
+            print(position[0])
         
         # Annotate frame with pipeline info
-        frame = self._annotate_frame(frame, position, gripper_force, sensor_data)
+        frame = self._annotate_frame(frame, position, gripper_force, pressure_value=pressure_value, sensor_data={})
         
         return frame
     
@@ -280,7 +294,8 @@ class MockStreamingDemo:
         frame: np.ndarray,
         position: np.ndarray,
         gripper_force: float,
-        sensor_data: dict
+        sensor_data: dict,
+        pressure_value: float
     ) -> np.ndarray:
         """Add text overlay to frame"""
         
@@ -311,11 +326,10 @@ class MockStreamingDemo:
         
         cv2.putText(frame, f"Gripper Force: {gripper_force:.1f}%", (20, y), font, font_scale, color, thickness)
         y += 30
-        
-        if sensor_data:
-            cv2.putText(frame, f"Pressure: {sensor_data['pressure']:.0f}", (20, y), font, font_scale, color, thickness)
-            y += 25
-            cv2.putText(frame, f"EMG: {sensor_data['emg_1']:.0f}, {sensor_data['emg_2']:.0f}, {sensor_data['emg_3']:.0f}", (20, y), font, font_scale, color, thickness)
+
+        cv2.putText(frame, f"Pressure: {pressure_value:.0f}", (20, y), font, font_scale, color, thickness)
+        y += 25
+
         
         # Arduino status (bottom right)
         status = self.arduino.get_status()

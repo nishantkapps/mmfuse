@@ -23,10 +23,8 @@ from robotic_arm_controller import RoboticArmController3DOF
 from preprocessing.preprocessor import VisionPreprocessor, AudioPreprocessor
 # Avoid conflict with built-in 'io' module by importing directly from file path
 import sys
-import os
-sys.path.insert(0, os.path.dirname(__file__))
-from io.arduino_controller import ArduinoController, SensorBuffer
 
+from arduino_controller import ArduinoController, SensorBuffer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -277,7 +275,7 @@ class StreamingRobotController:
             vision_tensor = vision_tensor.unsqueeze(0).to(self.device)
             
             # 2. Encode vision
-            vision_emb = self.vision_encoder.encode(vision_tensor)
+            vision_emb = self.vision_encoder(vision_tensor)
             
             # 3. Encode audio (if buffer ready)
             audio_emb = self._encode_audio()
@@ -293,9 +291,11 @@ class StreamingRobotController:
                     'pressure': pressure_emb,
                     'emg': emg_emb
                 })
-            else:
+            elif pressure_emb is not None:
                 # Fallback: use vision only (or handle gracefully)
-                fused = vision_emb
+                fused = self.fusion({'vision': vision_emb, 'pressure': pressure_emb})
+            else:
+                fused = vision_emb  # Minimal fallback
             
             # 6. Decode to robot commands
             result = self.controller.decode(fused)
@@ -312,6 +312,7 @@ class StreamingRobotController:
                 logger.info(
                     f"Frame {self.frame_count} | FPS: {fps:.1f} | "
                     f"Joint angles: ({joint_angles[0]:.1f}°, {joint_angles[1]:.1f}°, {joint_angles[2]:.1f}°) | "
+                    f"pressure: {pressure_emb}"
                     f"Gripper: {gripper_force:.1f}%"
                 )
     
@@ -327,6 +328,7 @@ class StreamingRobotController:
         return audio_emb.mean(dim=1) if audio_emb.dim() > 2 else audio_emb
     
     def _encode_sensors(self) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+
         """Encode pressure and EMG sensor data"""
         snapshot = self.sensor_buffer.get_snapshot()
         

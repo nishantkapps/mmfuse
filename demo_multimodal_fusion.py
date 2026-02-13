@@ -9,6 +9,7 @@ import numpy as np
 import sys
 from pathlib import Path
 
+
 # Add root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -17,6 +18,16 @@ from encoders.audio_encoder_learnable import AudioEncoder
 from encoders.sensor_encoder import PressureSensorEncoder, EMGSensorEncoder
 from fusion.multimodal_fusion import MultimodalFusion
 from preprocessing.preprocessor import SensorPreprocessor
+
+import serial
+import time
+from collections import deque
+
+PORT = "COM3"
+BAUD = 9600
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+WINDOW_SIZE = 1000   # 1 second at 1kHz
 
 
 class RoboticArmController(torch.nn.Module):
@@ -219,7 +230,36 @@ def main():
     audio = torch.randn(batch_size, 80000, device=device)
     
     # Pressure: 1000 samples @ 1kHz
-    pressure = torch.randn(batch_size, 1, 1000, device=device)
+    print("Collecting 1000 pressure samples...")
+
+    ser = serial.Serial(PORT, 115200, timeout=1)
+    time.sleep(2)
+
+    buffer = deque(maxlen=WINDOW_SIZE)
+
+    while len(buffer) < WINDOW_SIZE:
+        if ser.in_waiting > 0:
+            line = ser.readline().decode(errors="ignore").strip()
+            if not line:
+                continue
+            
+            try:
+                value = float(line)
+                buffer.append(value)
+            except ValueError:
+                continue
+
+    ser.close()
+
+    # Convert to tensor
+    pressure = torch.tensor(buffer, dtype=torch.float32, device=device)
+    pressure = pressure.unsqueeze(0).unsqueeze(0)  # (1,1,1000)
+
+    # Match batch size
+    pressure = pressure.repeat(batch_size, 1, 1)
+
+    print(f"✓ Pressure:    {tuple(pressure.shape)}")
+
     
     # EMG: 8 channels × 1000 samples
     emg = torch.randn(batch_size, 8, 1000, device=device)
