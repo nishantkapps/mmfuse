@@ -1,0 +1,53 @@
+# Action-to-robot mapping for sdata model
+# Each action class (part1=0, part2=1, ...) maps to joint angles + gripper force
+# Customize these values for your robot and action semantics
+
+actions:
+  # part1 -> action 0
+  - name: "part1"
+    angle1: 0
+    angle2: 0
+    angle3: 90
+    gripper_force: 0
+  # part2 -> action 1
+  - name: "part2"
+    angle1: 30
+    angle2: 0
+    angle3: 90
+    gripper_force: 25
+  # part3 -> action 2
+  - name: "part3"
+    angle1: -30
+    angle2: 0
+    angle3: 90
+    gripper_force: 50
+  # part4 -> action 3
+  - name: "part4"
+    angle1: 0
+    angle2: 30
+    angle3: 90
+    gripper_force: 75
+  # part5 -> action 4
+  - name: "part5"
+    angle1: 0
+    angle2: -30
+    angle3: 90
+    gripper_force: 100
+  # part6 -> action 5
+  - name: "part6"
+    angle1: 45
+    angle2: 45
+    angle3: 90
+    gripper_force: 50
+  # part7 -> action 6
+  - name: "part7"
+    angle1: -45
+    angle2: -45
+    angle3: 90
+    gripper_force: 50
+  # part8 -> action 7 (home/zero pose; model often predicts this when untrained or uncertain)
+  - name: "part8"
+    angle1: 0
+    angle2: 0
+    angle3: 0
+    gripper_force: 0

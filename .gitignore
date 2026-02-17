@@ -1,0 +1,7 @@
+/dataset/
+/encoder_diagrams/
+/extdataset/
+*.png
+*.ods
+*.mp4
+*.wav

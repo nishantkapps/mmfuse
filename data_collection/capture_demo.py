@@ -79,20 +79,20 @@ def _annotate_capture_frame(frame, elapsed, duration, robot_state, pressure_val,
     color = (0, 255, 0)
     thickness = 1
 
-    cv2.rectangle(frame, (10, 10), (500, 220), (0, 0, 0), -1)
-    cv2.rectangle(frame, (10, 10), (500, 220), (0, 255, 0), 2)
+    #cv2.rectangle(frame, (10, 10), (500, 220), (0, 0, 0), -1)
+    #cv2.rectangle(frame, (10, 10), (500, 220), (0, 255, 0), 2)
 
-    y = 35
-    cv2.putText(frame, f"RECORDING | {elapsed:.1f}s / {duration:.1f}s", (20, y), font, font_scale, color, thickness)
-    y += 30
-    if robot_state:
-        cv2.putText(frame, f"Robot: j1={robot_state.get('j1',0):.2f} j2={robot_state.get('j2',0):.2f} j3={robot_state.get('j3',0):.2f}", (20, y), font, font_scale, color, thickness)
-    y += 30
-    cv2.putText(frame, f"Pressure: {pressure_val:.2f}", (20, y), font, font_scale, color, thickness)
-    y += 28
-    cv2.putText(frame, f"EMG: {emg_vals[0]:.2f}, {emg_vals[1]:.2f}, {emg_vals[2]:.2f}", (20, y), font, font_scale, color, thickness)
-    y += 30
-    cv2.putText(frame, f"Audio RMS: {audio_rms:.4f}", (20, y), font, font_scale, (255, 255, 0), thickness)
+    #y = 35
+    #cv2.putText(frame, f"RECORDING | {elapsed:.1f}s / {duration:.1f}s", (20, y), font, font_scale, color, thickness)
+    #y += 30
+    #if robot_state:
+    #    cv2.putText(frame, f"Robot: j1={robot_state.get('j1',0):.2f} j2={robot_state.get('j2',0):.2f} j3={robot_state.get('j3',0):.2f}", (20, y), font, font_scale, color, thickness)
+    #y += 30
+    #cv2.putText(frame, f"Pressure: {pressure_val:.2f}", (20, y), font, font_scale, color, thickness)
+    #y += 28
+    #cv2.putText(frame, f"EMG: {emg_vals[0]:.2f}, {emg_vals[1]:.2f}, {emg_vals[2]:.2f}", (20, y), font, font_scale, color, thickness)
+    #y += 30
+    #cv2.putText(frame, f"Audio RMS: {audio_rms:.4f}", (20, y), font, font_scale, (255, 255, 0), thickness)
 
     # Transcript overlay (bottom-left, same style as demo_mock_streaming)
     if transcript:
@@ -416,6 +416,7 @@ def main():
                     latest_robot, latest_pressure, latest_emg, audio_rms, transcript=transcript
                 )
                 cv2.imshow('Capture - Camera 1', ann1)
+#                cv2.imshow('Capture - Camera 1', frame1)
 
                 frame2 = None
                 if cap2 is not None:
@@ -427,6 +428,7 @@ def main():
                             latest_robot, latest_pressure, latest_emg, audio_rms, transcript=transcript
                         )
                         cv2.imshow('Capture - Camera 2', ann2)
+#                        cv2.imshow('Capture - Camera 2', frame2)
 
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
