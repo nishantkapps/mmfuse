@@ -22,7 +22,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mmfuse.preprocessing.preprocessor import VisionPreprocessor, AudioPreprocessor
 from mmfuse.encoders.vision_encoder import VisionEncoder
+from mmfuse.encoders.vision_encoder_viscop import VisCoPVisionEncoder
 from mmfuse.encoders.audio_encoder_learnable import AudioEncoder as LearnableAudioEncoder
+from mmfuse.encoders.audio_encoder import Wav2VecPooledEncoder
+from mmfuse.encoders.audio_encoder_whisper import WhisperAudioEncoder
 from mmfuse.encoders.sensor_encoder import PressureSensorEncoder, EMGSensorEncoder
 from mmfuse.fusion.multimodal_fusion import MultimodalFusionWithAttention
 from mmfuse.io.arduino_controller import ArduinoController, SensorBuffer
@@ -50,12 +53,18 @@ class SDataRobotController:
         self,
         checkpoint_path: str,
         action_config_path: str = "config/sdata_action_config.yaml",
-        device: str = "cuda" if torch.cuda.is_available() else "cpu"
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        audio_encoder: Optional[str] = None,
+        vision_encoder: Optional[str] = None,
+        viscop_model_path: Optional[str] = None,
     ):
         self.device = device
         self.running = False
         self.checkpoint_path = Path(checkpoint_path)
         self.action_config_path = Path(action_config_path)
+        self.audio_encoder_type = audio_encoder  # learnable|wav2vec|whisper; None = from checkpoint
+        self.vision_encoder_type = vision_encoder  # clip|viscop; None = from checkpoint
+        self.viscop_model_path = viscop_model_path or "viscop_trained_models/viscop_qwen2.5_7b_viscop-lora_egocentric-expert"
 
         self._load_action_mapping()
         self._load_model()
@@ -82,26 +91,38 @@ class SDataRobotController:
         """Load trained sdata checkpoint (fusion + classifier)."""
         ckpt = torch.load(self.checkpoint_path, map_location=self.device)
         num_classes = ckpt.get('num_classes', 8)
+        audio_type = self.audio_encoder_type or ckpt.get('audio_encoder', 'learnable')
+        vision_type = self.vision_encoder_type or ckpt.get('vision_encoder', 'clip')
+        vision_dim = ckpt.get('vision_dim', 512)
 
-        vision = VisionEncoder(device=self.device)
-        audio = LearnableAudioEncoder(device=self.device)
+        if vision_type == 'viscop':
+            vision = VisCoPVisionEncoder(model_path=self.viscop_model_path, device=self.device)
+        else:
+            vision = VisionEncoder(device=self.device)
+        if audio_type == 'wav2vec':
+            audio = Wav2VecPooledEncoder(frozen=True, device=self.device)
+        elif audio_type == 'whisper':
+            audio = WhisperAudioEncoder(frozen=True, device=self.device)
+        else:
+            audio = LearnableAudioEncoder(device=self.device)
         pressure = PressureSensorEncoder(output_dim=256, input_features=2)
         emg = EMGSensorEncoder(output_dim=256, num_channels=3, input_features=4)
 
         modality_dims = {
-            'vision_camera1': vision.output_dim,
-            'vision_camera2': vision.output_dim,
+            'vision_camera1': vision_dim,
+            'vision_camera2': vision_dim,
             'audio': 768,
             'pressure': 256,
             'emg': 256,
         }
+        fusion_dim = ckpt.get('fusion_dim', 512)
         fusion = MultimodalFusionWithAttention(
             modality_dims=modality_dims,
-            fusion_dim=512,
+            fusion_dim=fusion_dim,
             num_heads=8,
             dropout=0.2
         )
-        classifier = ActionClassifier(embedding_dim=512, num_classes=num_classes)
+        classifier = ActionClassifier(embedding_dim=fusion_dim, num_classes=num_classes)
 
         fusion.load_state_dict(ckpt['fusion_state'])
         classifier.load_state_dict(ckpt['model_state'])
@@ -111,6 +132,7 @@ class SDataRobotController:
             m.eval()
 
         self.vision_encoder = vision
+        self.vision_encoder_type = vision_type
         self.audio_encoder = audio
         self.pressure_encoder = pressure
         self.emg_encoder = emg
@@ -155,7 +177,13 @@ class SDataRobotController:
 
     def _encode_frame(self, frame: np.ndarray) -> torch.Tensor:
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        t = self.vision_preprocessor.preprocess(frame_rgb).unsqueeze(0).to(self.device)
+        if self.vision_encoder_type == 'viscop':
+            # VisCoP expects raw RGB (0-1); resize to 224x224
+            resized = cv2.resize(frame_rgb, (224, 224))
+            t = torch.from_numpy(resized).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+            t = t.to(self.device)
+        else:
+            t = self.vision_preprocessor.preprocess(frame_rgb).unsqueeze(0).to(self.device)
         with torch.no_grad():
             return self.vision_encoder(t)
 
@@ -331,6 +359,12 @@ def main():
     p.add_argument('--checkpoint', help='Path to ckpt_sdata_epoch_N.pt (or dir to auto-pick latest)')
     p.add_argument('--action-config', default='config/sdata_action_config.yaml')
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
+    p.add_argument('--audio-encoder', choices=['learnable', 'wav2vec', 'whisper'], default=None,
+                   help='Overrides checkpoint; use same as training (default: from checkpoint)')
+    p.add_argument('--vision-encoder', choices=['clip', 'viscop'], default=None,
+                   help='Overrides checkpoint (default: from checkpoint)')
+    p.add_argument('--viscop-model-path', default=None,
+                   help='Path to VisCoP model (when --vision-encoder viscop)')
     p.add_argument('--webcam', type=int, nargs='+', default=[0, 1])
     p.add_argument('--duration', type=float, default=None)
     args = p.parse_args()
@@ -349,7 +383,10 @@ def main():
     controller = SDataRobotController(
         checkpoint_path=ckpt_path,
         action_config_path=args.action_config,
-        device=args.device
+        device=args.device,
+        audio_encoder=args.audio_encoder,
+        vision_encoder=args.vision_encoder,
+        viscop_model_path=args.viscop_model_path,
     )
     controller.run(webcam_ids=args.webcam, duration=args.duration)
 

@@ -173,3 +173,17 @@ class AudioEncoder(nn.Module):
         audio = torch.from_numpy(audio).float()
         
         return audio
+
+
+class Wav2VecPooledEncoder(AudioEncoder):
+    """
+    Wav2Vec encoder that returns (batch, embedding_dim) via mean pooling.
+    Use this for fusion pipelines that expect fixed-size embeddings per modality.
+    """
+    def forward(
+        self,
+        audio: torch.Tensor,
+        sampling_rate: Optional[int] = None
+    ) -> torch.Tensor:
+        out = super().forward(audio, sampling_rate)
+        return out.mean(dim=1)

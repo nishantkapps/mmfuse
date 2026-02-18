@@ -197,12 +197,14 @@ class MultimodalFusionWithAttention(nn.Module):
             batch_first=True
         )
         
-        # Final fusion
+        # Final fusion: concat(attended) -> MLP. Use smaller hidden to reduce params.
+        # fusion_dim * num_modalities can be large; hidden = fusion_dim keeps params low
+        concat_dim = fusion_dim * len(modality_dims)
         self.fusion_mlp = nn.Sequential(
-            nn.Linear(fusion_dim * len(modality_dims), fusion_dim * 2),
+            nn.Linear(concat_dim, fusion_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(fusion_dim * 2, fusion_dim)
+            nn.Linear(fusion_dim, fusion_dim)
         )
     
     def forward(self, embeddings: Dict[str, torch.Tensor], return_kl: bool = True) -> Tuple[torch.Tensor, dict]:

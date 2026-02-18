@@ -42,6 +42,10 @@ sounddevice==0.4.6
 # Optional ASR
 vosk==0.3.64
 
+# Optional: VisCoP vision encoder (for --vision-encoder viscop)
+# pip install git+https://github.com/dominickrei/VisCoP.git
+# Then: huggingface-cli download dreilly/viscop-models --local-dir viscop_trained_models
+
 # Optional: Model visualization
 # torchviz, graphviz       # for tools/visualize_model_architecture.py
 # visualtorch              # for tools/generate_paper_diagram.py
