@@ -97,7 +97,7 @@ class ArduinoController:
             self.connected = False
             return False
     
-    def disconnect(self):   
+    def disconnect(self):
         """Close connection to Arduino"""
         if self.ser and self.ser.is_open:
             self.ser.close()
@@ -153,10 +153,38 @@ class ArduinoController:
         try:
             if self.ser.in_waiting > 0:
                 line = self.ser.readline().decode(errors="ignore").strip()
-                logger.info(f"[RAW SERIAL] {line}")  # 👈 THIS IS THE KEY LINE
-                return None
+
+                # Log raw serial (optional but useful)
+                logger.info(f"[RAW SERIAL] {line}")
+
+                if not line.startswith("SENSORS:"):
+                    return None
+
+                # Strip prefix and split
+                payload = line.replace("SENSORS:", "")
+                parts = payload.split(",")
+
+                if len(parts) != 4:
+                    logger.warning(f"Malformed sensor packet: {line}")
+                    return None
+
+                # Convert to floats
+                pressure = float(parts[0])
+                emg_1 = float(parts[1])
+                emg_2 = float(parts[2])
+                emg_3 = float(parts[3])
+
+                return {
+                    "pressure": pressure,
+                    "emg_1": emg_1,
+                    "emg_2": emg_2,
+                    "emg_3": emg_3
+                }
+
         except Exception as e:
-            print(f"Serial error: {e}")
+            logger.error(f"Serial read error: {e}", exc_info=True)
+
+        return None
 
     
     def get_status(self) -> str:
@@ -202,7 +230,7 @@ class SensorBuffer:
     def get_snapshot(self) -> Optional[Tuple]:
         """Get current buffer snapshot as numpy arrays"""
         import numpy as np
-
+        
         with self._lock:
             if len(self.pressure) > 0 and all(len(e) > 0 for e in self.emg):
                 return (

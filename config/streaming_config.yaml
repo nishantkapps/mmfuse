@@ -37,11 +37,11 @@ sensor_pins:
 motors:
   count: 3
   pins:
-    - pin: 3   # Motor 1 (PWM pin)
+    - pin: 10   # Motor 1 (PWM pin)
       type: "pwm"
       min_angle: -90
       max_angle: 90
-    - pin: 5   # Motor 2 (PWM pin)
+    - pin: 9   # Motor 2 (PWM pin)
       type: "pwm"
       min_angle: -90
       max_angle: 90
