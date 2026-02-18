@@ -224,13 +224,15 @@ class MultimodalFusionWithAttention(nn.Module):
             projected[modality] = self.projections[modality](embedding)
         
         # --- Knowledge Distillation (KL Divergence) ---
+        # Use temperature to soften distributions and avoid NaN from extreme log_softmax
+        kl_temp = 2.0
         kl_losses = {}
         # Camera modalities: look for keys containing 'camera' or 'vision'
         camera_keys = [k for k in projected if 'camera' in k or 'vision' in k]
         if len(camera_keys) == 2:
             cam1, cam2 = camera_keys
-            p1 = torch.log_softmax(projected[cam1], dim=-1)
-            p2 = torch.softmax(projected[cam2], dim=-1)
+            p1 = torch.log_softmax(projected[cam1] / kl_temp, dim=-1)
+            p2 = torch.softmax(projected[cam2] / kl_temp, dim=-1).clamp(min=1e-8)
             kl_cam = torch.nn.functional.kl_div(p1, p2, reduction='batchmean')
             kl_losses['kl_camera'] = kl_cam
         # Text/Audio modalities
@@ -239,8 +241,8 @@ class MultimodalFusionWithAttention(nn.Module):
         if text_keys and audio_keys:
             text_key = text_keys[0]
             audio_key = audio_keys[0]
-            p1 = torch.log_softmax(projected[text_key], dim=-1)
-            p2 = torch.softmax(projected[audio_key], dim=-1)
+            p1 = torch.log_softmax(projected[text_key] / kl_temp, dim=-1)
+            p2 = torch.softmax(projected[audio_key] / kl_temp, dim=-1).clamp(min=1e-8)
             kl_text_audio = torch.nn.functional.kl_div(p1, p2, reduction='batchmean')
             kl_losses['kl_text_audio'] = kl_text_audio
         

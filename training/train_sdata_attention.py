@@ -167,9 +167,12 @@ class PrecomputedSDataDataset(Dataset):
 
 def build_embedding_precomputed(batch, device, encoders):
     """Use precomputed embeddings; only fusion + classifier run."""
-    v1 = torch.stack([s['vision_camera1'] for s in batch]).to(device)
-    v2 = torch.stack([s['vision_camera2'] for s in batch]).to(device)
-    a = torch.stack([s['audio'] for s in batch]).to(device)
+    v1 = torch.stack([s['vision_camera1'] for s in batch]).to(device).float()
+    v2 = torch.stack([s['vision_camera2'] for s in batch]).to(device).float()
+    a = torch.stack([s['audio'] for s in batch]).to(device).float()
+    # Replace NaN/Inf with 0 to avoid training instability (e.g. from VisCoP)
+    for t in (v1, v2, a):
+        t[~torch.isfinite(t)] = 0.0
     pressures = torch.zeros(len(batch), 2, device=device)
     emgs = torch.zeros(len(batch), 4, device=device)
 
@@ -407,11 +410,16 @@ def train(args):
 
             optimizer.zero_grad()
             loss.backward()
-            optimizer.step()
+            if torch.isfinite(loss).all():
+                torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(fusion.parameters()), max_norm=1.0)
+                optimizer.step()
 
-            epoch_loss += loss_bc.item()
+            lb = loss_bc.item()
+            epoch_loss += lb if (lb == lb and abs(lb) != float('inf')) else 0.0
             if kl_losses:
-                epoch_kl += sum(v.item() for v in kl_losses.values())
+                for v in kl_losses.values():
+                    kv = v.item()
+                    epoch_kl += kv if (kv == kv and abs(kv) != float('inf')) else 0.0
             pred = logits.argmax(dim=1)
             correct += (pred == targets).sum().item()
             total += len(batch)
