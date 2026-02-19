@@ -43,16 +43,34 @@ def _augment_frame(frame: np.ndarray, variation_id: int) -> np.ndarray:
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def build_sample_list(root_dir: Path, cross_pair: bool, augment_variations: int):
-    """Same logic as SDataDataset.samples."""
-    samples = []
+def build_sample_list(root_dir: Path, cross_pair: bool, augment_variations: int, split_before_aug: bool = False):
+    """Same logic as SDataDataset.samples. If split_before_aug, returns (train_samples, test_samples)."""
+    from sklearn.model_selection import train_test_split
+
     part_dirs = sorted([d for d in root_dir.iterdir() if d.is_dir() and d.name.startswith('part')])
     part_to_label = {p.name: i for i, p in enumerate(part_dirs)}
 
+    def _samples_for_pairs(label, video_pairs, audio_paths, pairs_to_include, variations):
+        """variations: list of v values to include (e.g. range(16) for all, [0] for v=0 only)."""
+        samples = []
+        pair_to_audio = {}
+        for (c1, c2), ap in zip(video_pairs, audio_paths):
+            pair_to_audio[(str(c1), str(c2))] = ap
+        augmented = [(c1, c2, v) for c1, c2 in video_pairs for v in variations
+                     if (str(c1), str(c2)) in pairs_to_include]
+        if cross_pair:
+            for audio_path in audio_paths:
+                for cam1, cam2, v in augmented:
+                    samples.append((audio_path, cam1, cam2, label, v))
+        else:
+            for cam1, cam2, v in augmented:
+                audio_path = pair_to_audio.get((str(cam1), str(cam2)))
+                samples.append((audio_path, cam1, cam2, label, v))
+        return samples
+
+    all_pairs_with_label = []
     for part_dir in part_dirs:
         label = part_to_label[part_dir.name]
-        video_pairs = []
-        audio_paths = []
         for pdir in part_dir.iterdir():
             if not pdir.is_dir():
                 continue
@@ -60,23 +78,34 @@ def build_sample_list(root_dir: Path, cross_pair: bool, augment_variations: int)
             cam2 = list(pdir.glob('*_c2_*.mp4'))
             if not (cam1 and cam2):
                 continue
-            video_pairs.append((cam1[0], cam2[0]))
-            audio_paths.append(_get_audio_path(pdir))
+            all_pairs_with_label.append((cam1[0], cam2[0], label))
 
-        augmented_video_pairs = []
-        for cam1, cam2 in video_pairs:
-            for v in range(augment_variations):
-                augmented_video_pairs.append((cam1, cam2, v))
+    if not split_before_aug:
+        samples = []
+        for part_dir in part_dirs:
+            label = part_to_label[part_dir.name]
+            video_pairs = [(c1, c2) for c1, c2, l in all_pairs_with_label if l == label]
+            audio_paths = [_get_audio_path(pdir) for pdir in part_dir.iterdir() if pdir.is_dir()]
+            audio_paths = [a for a in audio_paths if a]
+            pairs_set = set((str(c1), str(c2)) for c1, c2 in video_pairs)
+            samples.extend(_samples_for_pairs(label, video_pairs, audio_paths, pairs_set, list(range(augment_variations))))
+        return samples
 
-        if cross_pair:
-            for audio_path in audio_paths:
-                for cam1, cam2, v in augmented_video_pairs:
-                    samples.append((audio_path, cam1, cam2, label, v))
-        else:
-            for i, (cam1, cam2, v) in enumerate(augmented_video_pairs):
-                audio_path = audio_paths[i // augment_variations] if i // augment_variations < len(audio_paths) else None
-                samples.append((audio_path, cam1, cam2, label, v))
-    return samples
+    unique_pairs = list({(str(c1), str(c2), l) for c1, c2, l in all_pairs_with_label})
+    pair_labels = [p[2] for p in unique_pairs]
+    train_pairs, test_pairs = train_test_split(unique_pairs, test_size=0.1, stratify=pair_labels, random_state=42)
+    train_set = set((p[0], p[1]) for p in train_pairs)
+    test_set = set((p[0], p[1]) for p in test_pairs)
+
+    train_samples, test_samples = [], []
+    for part_dir in part_dirs:
+        label = part_to_label[part_dir.name]
+        video_pairs = [(c1, c2) for c1, c2, l in all_pairs_with_label if l == label]
+        audio_paths = [_get_audio_path(pdir) for pdir in part_dir.iterdir() if pdir.is_dir()]
+        audio_paths = [a for a in audio_paths if a]
+        train_samples.extend(_samples_for_pairs(label, video_pairs, audio_paths, train_set, list(range(augment_variations))))
+        test_samples.extend(_samples_for_pairs(label, video_pairs, audio_paths, test_set, [0]))
+    return train_samples, test_samples
 
 
 def load_frame(path) -> np.ndarray:
@@ -106,14 +135,13 @@ def main():
                    default='viscop_trained_models/viscop_qwen2.5_7b_viscop-lora_egocentric-expert')
     p.add_argument('--cross-pair', action='store_true')
     p.add_argument('--augment-variations', type=int, default=16)
-    p.add_argument('--batch-size', type=int, default=24, help='Batch size for encoding (try 32–48 on A100 if OOM)')
+    p.add_argument('--batch-size', type=int, default=24, help='Batch size for encoding')
     p.add_argument('--device', default='cuda:auto' if torch.cuda.is_available() else 'cpu',
                    help='Device: cuda:auto (pick freest GPU), cuda:0..3, cuda, auto (multi-GPU), cpu')
     args = p.parse_args()
 
     # Resolve device
     if args.device == 'cuda:auto' and torch.cuda.is_available():
-        # Pick GPU with most free memory
         best_idx, best_free = 0, 0
         for i in range(torch.cuda.device_count()):
             try:
@@ -127,9 +155,6 @@ def main():
                 pass
         device = torch.device(f'cuda:{best_idx}')
         log.info("Using GPU: %s (%s) - %.1f GB free", device, torch.cuda.get_device_name(device), best_free / 1e9)
-    elif args.device == 'auto' and torch.cuda.is_available():
-        device = torch.device('cuda:0')  # primary; model will use device_map="auto" across all
-        log.info("Using multi-GPU (device_map=auto) across %d GPUs", torch.cuda.device_count())
     elif 'cuda' in args.device and not torch.cuda.is_available():
         log.warning("CUDA requested but not available. Falling back to CPU.")
         device = torch.device('cpu')
@@ -159,14 +184,12 @@ def main():
     target_audio_samples = int(aprep.duration * aprep.sample_rate)
 
     # Vision encoder
-    use_multi_gpu = (args.device == 'auto' and torch.cuda.is_available())
     if args.vision_encoder == 'viscop':
         vision = VisCoPVisionEncoder(
             model_path=args.viscop_model_path,
-            device='auto' if use_multi_gpu else str(device),
+            device=str(device),
         )
-        if not use_multi_gpu:
-            vision = vision.to(device)
+        vision = vision.to(device)
         use_clip_preprocess = False  # VisCoP has its own processor
     else:
         vision = VisionEncoder(device=str(device)).to(device)
@@ -223,7 +246,6 @@ def main():
                 a = torch.zeros(target_audio_samples)
             audios.append(a)
 
-        # Vision
         if use_clip_preprocess:
             vis_t1 = torch.stack([vprep.preprocess(f) for f in frames1]).to(device)
             vis_t2 = torch.stack([vprep.preprocess(f) for f in frames2]).to(device)
@@ -235,7 +257,6 @@ def main():
             v_emb1 = vision(vis_t1)
             v_emb2 = vision(vis_t2)
 
-        # Audio
         audio_batch = torch.stack(audios).to(device)
         with torch.no_grad():
             a_emb = audio(audio_batch)
@@ -257,7 +278,6 @@ def main():
             eta = (len(samples) - done) / rate if rate > 0 else 0
             log.info("Precomputed %d / %d (%.1f%%) | %.1f samples/s | ETA %.0fm",
                      done, len(samples), 100 * done / len(samples), rate, eta / 60)
-
     elapsed = time.time() - t0
     log.info("Done in %.1fm. Embeddings saved to %s", elapsed / 60, out_dir)
 

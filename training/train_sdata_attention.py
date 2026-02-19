@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 
 import torch
+import yaml
 from torch.utils.data import Subset
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -250,6 +251,38 @@ class ActionClassifier(nn.Module):
         return self.fc(x)
 
 
+class MovementHead(nn.Module):
+    """Regression head: fused embedding -> (delta_along, delta_lateral, magnitude)."""
+    def __init__(self, embedding_dim=256):
+        super().__init__()
+        self.fc = nn.Linear(embedding_dim, 3)
+
+    def forward(self, x):
+        return self.fc(x)
+
+
+def load_movement_targets(config_path: str, num_classes: int) -> torch.Tensor:
+    """Load (delta_along, delta_lateral, magnitude) per action_id from YAML. Returns (num_classes, 3)."""
+    path = Path(config_path)
+    if not path.is_absolute():
+        proj_root = Path(__file__).resolve().parent.parent
+        path = proj_root / path
+    if not path.exists():
+        log.warning("Movement config not found at %s; using zeros", config_path)
+        return torch.zeros(num_classes, 3)
+    with open(path) as f:
+        cfg = yaml.safe_load(f)
+    movements = cfg.get('movements', [])
+    targets = []
+    for i in range(num_classes):
+        if i < len(movements):
+            m = movements[i]
+            targets.append([m.get('delta_along', 0), m.get('delta_lateral', 0), m.get('magnitude', 0)])
+        else:
+            targets.append([0, 0, 0])
+    return torch.tensor(targets, dtype=torch.float32)
+
+
 def train(args):
     device = torch.device(args.device)
     log.info("=" * 60)
@@ -288,15 +321,37 @@ def train(args):
         audio_dim = 768
         build_emb_fn = build_embedding
 
-    # 80/20 stratified train/test split
+    # 90/10 stratified train/test split (split BEFORE augmentation to avoid leakage)
     from sklearn.model_selection import train_test_split
     if use_precomputed:
         labels = [torch.load(p, map_location='cpu', weights_only=True)['target'] for p in ds.samples]
+        train_idx, test_idx = train_test_split(
+            range(len(ds)), test_size=0.1, stratify=labels, random_state=42
+        )
+        log.warning("Precomputed: split-after-augmentation (cannot split before augmentation without metadata)")
     else:
-        labels = [s[3] for s in ds.samples]
-    train_idx, test_idx = train_test_split(
-        range(len(ds)), test_size=0.2, stratify=labels, random_state=42
-    )
+        # Split by base (cam1, cam2) first; train gets all augmentations, test gets v=0 only
+        pair_to_label = {}
+        for audio_path, cam1, cam2, label, v in ds.samples:
+            key = (str(cam1), str(cam2))
+            pair_to_label[key] = label
+        unique_pairs = list(pair_to_label.keys())
+        pair_labels = [pair_to_label[p] for p in unique_pairs]
+        train_pairs, test_pairs = train_test_split(
+            unique_pairs, test_size=0.1, stratify=pair_labels, random_state=42
+        )
+        train_pairs_set = set(train_pairs)
+        test_pairs_set = set(test_pairs)
+        train_idx = []
+        test_idx = []
+        for i, (audio_path, cam1, cam2, label, v) in enumerate(ds.samples):
+            key = (str(cam1), str(cam2))
+            if key in train_pairs_set:
+                train_idx.append(i)
+            elif key in test_pairs_set and v == 0:
+                test_idx.append(i)
+        log.info("Split before augmentation: %d train pairs (all aug) | %d test pairs (v=0 only)",
+                 len(train_pairs), len(test_pairs))
     train_ds = Subset(ds, train_idx)
     test_ds = Subset(ds, test_idx)
     num_workers = 4 if use_precomputed else 0
@@ -305,9 +360,11 @@ def train(args):
 
     n_per_part = len(ds) // num_classes if num_classes else 0
     log.info("Dataset: %d samples (%d per part), %d classes", len(ds), n_per_part, num_classes)
-    log.info("Train: %d | Test: %d (80/20 split)", len(train_idx), len(test_idx))
+    log.info("Train: %d | Test: %d (90/10 split)", len(train_idx), len(test_idx))
 
     log.info("Building model (vision_dim=%d, audio_dim=%d, fusion) ...", vision_dim, audio_dim)
+
+    movement_targets = load_movement_targets(args.movement_config, num_classes).to(device)
 
     pressure = PressureSensorEncoder(output_dim=256, input_features=2).to(device)
     emg = EMGSensorEncoder(output_dim=256, num_channels=3, input_features=4).to(device)
@@ -343,7 +400,8 @@ def train(args):
         encoders = {'pressure': pressure, 'emg': emg, 'fusion': fusion}
 
     model = ActionClassifier(embedding_dim=args.fusion_dim, num_classes=num_classes).to(device)
-    trainable_params = list(model.parameters()) + list(fusion.parameters())
+    movement_head = MovementHead(embedding_dim=args.fusion_dim).to(device)
+    trainable_params = list(model.parameters()) + list(fusion.parameters()) + list(movement_head.parameters())
     optimizer = torch.optim.Adam(trainable_params, lr=args.lr)
     criterion = nn.CrossEntropyLoss()
 
@@ -367,6 +425,7 @@ def train(args):
         ("emg", emg),
         ("fusion (attention + KL)", fusion),
         ("classifier", model),
+        ("movement_head", movement_head),
     ]
     if not use_precomputed:
         components.insert(0, ("vision (CLIP)", vision))
@@ -385,6 +444,7 @@ def train(args):
     total_batches = len(train_dl)
     log_interval = max(1, total_batches // 10)  # log ~10 times per epoch
     epoch_times = []
+    history = {'train_loss': [], 'train_acc': [], 'test_acc': [], 'epoch_sec': []}
 
     for epoch in range(args.epochs):
         epoch_start = time.perf_counter()
@@ -392,6 +452,7 @@ def train(args):
         fusion.train()
         epoch_loss = 0.0
         epoch_kl = 0.0
+        epoch_movement = 0.0
         correct = 0
         total = 0
         kl_losses = {}
@@ -403,19 +464,26 @@ def train(args):
 
             fused, kl_losses = build_emb_fn(batch, device, encoders)
             logits = model(fused)
+            movement_pred = movement_head(fused)
 
             loss_bc = criterion(logits, targets)
             loss_kl = sum(kl_losses.values()) if kl_losses else torch.tensor(0.0, device=device)
-            loss = loss_bc + args.kl_weight * loss_kl
+            movement_targets_batch = movement_targets[targets]
+            loss_movement = nn.functional.mse_loss(movement_pred, movement_targets_batch)
+            loss = loss_bc + args.kl_weight * loss_kl + args.movement_weight * loss_movement
 
             optimizer.zero_grad()
             loss.backward()
             if torch.isfinite(loss).all():
-                torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(fusion.parameters()), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(
+                    list(model.parameters()) + list(fusion.parameters()) + list(movement_head.parameters()),
+                    max_norm=1.0)
                 optimizer.step()
 
             lb = loss_bc.item()
             epoch_loss += lb if (lb == lb and abs(lb) != float('inf')) else 0.0
+            if args.movement_weight > 0:
+                epoch_movement += loss_movement.item() if torch.isfinite(loss_movement) else 0.0
             if kl_losses:
                 for v in kl_losses.values():
                     kv = v.item()
@@ -438,18 +506,25 @@ def train(args):
         # Test evaluation
         model.eval()
         fusion.eval()
+        movement_head.eval()
         test_correct, test_total = 0, 0
+        test_movement_mse = 0.0
         with torch.no_grad():
             for batch in test_dl:
                 targets = torch.tensor([s['target'] for s in batch], dtype=torch.long).to(device)
                 fused, _ = build_emb_fn(batch, device, encoders)
                 logits = model(fused)
+                movement_pred = movement_head(fused)
                 pred = logits.argmax(dim=1)
                 test_correct += (pred == targets).sum().item()
                 test_total += len(batch)
+                mt = movement_targets[targets]
+                test_movement_mse += nn.functional.mse_loss(movement_pred, mt).item() * len(batch)
         test_acc = test_correct / test_total if test_total > 0 else 0
+        test_movement_mse = test_movement_mse / test_total if test_total > 0 else 0.0
         model.train()
         fusion.train()
+        movement_head.train()
 
         epoch_sec = time.perf_counter() - epoch_start
         epoch_times.append(epoch_sec)
@@ -458,14 +533,22 @@ def train(args):
         eta_sec = avg_epoch_sec * remaining_epochs if remaining_epochs > 0 else 0
         eta_str = f" | ETA {eta_sec/60:.1f}min" if remaining_epochs > 0 else ""
 
-        log.info("Epoch %d/%d done in %.1fs | train_loss=%.4f train_acc=%.4f test_acc=%.4f%s%s",
-                 epoch + 1, args.epochs, epoch_sec, epoch_loss / train_count, train_acc, test_acc, kl_str, eta_str)
+        movement_str = f" | mov={epoch_movement/train_count:.4f} test_mov={test_movement_mse:.4f}" if args.movement_weight > 0 else ""
+        log.info("Epoch %d/%d done in %.1fs | train_loss=%.4f train_acc=%.4f test_acc=%.4f%s%s%s",
+                 epoch + 1, args.epochs, epoch_sec, epoch_loss / train_count, train_acc, test_acc, kl_str, movement_str, eta_str)
+
+        history['train_loss'].append(epoch_loss / train_count)
+        history['train_acc'].append(train_acc)
+        history['test_acc'].append(test_acc)
+        history['epoch_sec'].append(epoch_sec)
 
         audio_enc = emb_config.get('audio_encoder', args.audio_encoder) if emb_config else args.audio_encoder
         vision_enc = emb_config.get('vision_encoder', 'clip') if emb_config else 'clip'
         ckpt = {
             'model_state': model.state_dict(),
             'fusion_state': fusion.state_dict(),
+            'movement_state': movement_head.state_dict(),
+            'movement_targets': movement_targets.cpu(),
             'num_classes': num_classes,
             'epoch': epoch + 1,
             'audio_encoder': audio_enc,
@@ -478,6 +561,11 @@ def train(args):
         log.info("Checkpoint saved: %s", ckpt_path)
 
     total_train_sec = sum(epoch_times)
+    history_path = os.path.join(args.out_dir, 'training_history.json')
+    with open(history_path, 'w') as f:
+        import json
+        json.dump(history, f, indent=2)
+    log.info("Training history saved: %s", history_path)
     log.info("=" * 60)
     log.info("TRAINING COMPLETE | total time %.1fs (%.1f min)", total_train_sec, total_train_sec / 60)
     log.info("=" * 60)
@@ -507,6 +595,10 @@ def main():
                    help='Use precomputed embeddings (run scripts/precompute_sdata_embeddings.py first)')
     p.add_argument('--embeddings-dir', type=str, default=None,
                    help='Path to precomputed embeddings dir (required if --use-precomputed)')
+    p.add_argument('--movement-config', type=str, default='config/sdata_movement_config.yaml',
+                   help='YAML mapping action_id -> (delta_along, delta_lateral, magnitude)')
+    p.add_argument('--movement-weight', type=float, default=0.5,
+                   help='Weight for movement loss (L = L_action + weight * L_movement)')
     args = p.parse_args()
 
     if args.use_precomputed and not args.embeddings_dir:

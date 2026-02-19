@@ -246,7 +246,6 @@ class VisCoPVisionEncoder(nn.Module):
             (batch_size, 3584) embeddings
         """
         pil_list = self._to_pil_list(images)
-        # Single image per item: use merge_size=1
         image_inputs = self.processor.process_images(images=pil_list, merge_size=1, return_tensors="pt")
         inp_device = next(self.model.parameters()).device if self.device == "auto" else self.device
         pixel_values = image_inputs["pixel_values"].to(device=inp_device, dtype=self._model_dtype)
@@ -267,7 +266,6 @@ class VisCoPVisionEncoder(nn.Module):
                 grid_sizes=grid_sizes,
                 merge_sizes=merge_sizes,
             )
-        # visual_probes: (batch * num_probes, 3584)
         batch_size = len(pil_list)
         probes = visual_probes.view(batch_size, self._num_visual_probes, -1)
-        return probes.mean(dim=1).float()  # (batch, 3584), float32 for downstream
+        return probes.mean(dim=1).float()

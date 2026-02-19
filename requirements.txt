@@ -24,6 +24,7 @@ open-clip-torch==2.24.0
 
 # Additional utilities
 scipy==1.11.4
+scikit-learn>=1.0.0
 matplotlib==3.8.2
 tqdm==4.66.1
 

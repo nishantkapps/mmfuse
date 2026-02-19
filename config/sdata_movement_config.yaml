@@ -1,0 +1,49 @@
+# Movement mapping for sdata model (Option 2: movement head)
+# Maps action_id (0..7) to (delta_along, delta_lateral, magnitude)
+# - delta_along: -1=toward wrist, 0=none, +1=toward elbow (along forearm)
+# - delta_lateral: -1=left, 0=none, +1=right (perpendicular to forearm)
+# - magnitude: 0=stay, 0.5=small step ("a little bit"), 1.0=normal step
+#
+# Adjust action order to match your part0..part7 directory order if different.
+
+movements:
+  # part0
+  - command: "Start the Massage"
+    delta_along: 0
+    delta_lateral: 0
+    magnitude: 0
+  # part1
+  - command: "Focus Here"
+    delta_along: 0
+    delta_lateral: 0
+    magnitude: 0
+  # part2
+  - command: "Move down a little bit"
+    delta_along: -1
+    delta_lateral: 0
+    magnitude: 0.5
+  # part3
+  - command: "Go Back Up"
+    delta_along: 1
+    delta_lateral: 0
+    magnitude: 1.0
+  # part4
+  - command: "Stop. Pause for a second"
+    delta_along: 0
+    delta_lateral: 0
+    magnitude: 0
+  # part5
+  - command: "Move to the Left"
+    delta_along: 0
+    delta_lateral: -1
+    magnitude: 1.0
+  # part6
+  - command: "Move to the Right"
+    delta_along: 0
+    delta_lateral: 1
+    magnitude: 1.0
+  # part7
+  - command: "Right there, perfect spot"
+    delta_along: 0
+    delta_lateral: 0
+    magnitude: 0

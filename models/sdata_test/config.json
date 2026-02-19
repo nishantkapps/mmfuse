@@ -1,0 +1,11 @@
+{
+  "model_type": "mmfuse_sdata",
+  "num_classes": 8,
+  "fusion_dim": 256,
+  "vision_dim": 3584,
+  "audio_dim": 768,
+  "vision_encoder": "viscop",
+  "audio_encoder": "wav2vec",
+  "has_movement_head": true,
+  "epoch": 1
+}

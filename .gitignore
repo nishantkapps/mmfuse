@@ -1,6 +1,7 @@
 /dataset/
 /encoder_diagrams/
 /extdataset/
+/embeddings/
 *.png
 *.ods
 *.mp4

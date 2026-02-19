@@ -44,6 +44,16 @@ class ActionClassifier(torch.nn.Module):
         return self.fc(x)
 
 
+class MovementHead(torch.nn.Module):
+    """Regression head: fused embedding -> (delta_along, delta_lateral, magnitude)."""
+    def __init__(self, embedding_dim=256):
+        super().__init__()
+        self.fc = torch.nn.Linear(embedding_dim, 3)
+
+    def forward(self, x):
+        return self.fc(x)
+
+
 class SDataRobotController:
     """
     Streaming controller using trained sdata model.
@@ -123,11 +133,17 @@ class SDataRobotController:
             dropout=0.2
         )
         classifier = ActionClassifier(embedding_dim=fusion_dim, num_classes=num_classes)
+        movement_head = MovementHead(embedding_dim=fusion_dim)
 
         fusion.load_state_dict(ckpt['fusion_state'])
         classifier.load_state_dict(ckpt['model_state'])
+        if 'movement_state' in ckpt:
+            movement_head.load_state_dict(ckpt['movement_state'])
+            self.has_movement_head = True
+        else:
+            self.has_movement_head = False
 
-        for m in [vision, audio, pressure, emg, fusion, classifier]:
+        for m in [vision, audio, pressure, emg, fusion, classifier, movement_head]:
             m.to(self.device)
             m.eval()
 
@@ -138,6 +154,7 @@ class SDataRobotController:
         self.emg_encoder = emg
         self.fusion = fusion
         self.classifier = classifier
+        self.movement_head = movement_head
         self.num_classes = num_classes
 
     def _init_preprocessors(self):
@@ -240,13 +257,32 @@ class SDataRobotController:
             fused, _ = self.fusion(embeddings, return_kl=True)
             logits = self.classifier(fused)
             action = logits.argmax(dim=1).item()
-        return action
+            if self.has_movement_head:
+                movement = self.movement_head(fused).cpu().numpy()[0]
+            else:
+                movement = None
+        return action, movement
 
     def _action_to_command(self, action: int) -> Tuple[float, float, float, float]:
         """Map action index to (angle1, angle2, angle3, gripper_force)."""
         if 0 <= action < len(self.action_commands):
             return self.action_commands[action]
         return self.action_commands[0]
+
+    def _apply_movement_delta(
+        self, angle1: float, angle2: float, angle3: float,
+        movement: np.ndarray,
+        scale: float = 15.0,
+    ) -> Tuple[float, float, float]:
+        """Apply movement (delta_along, delta_lateral, magnitude) to base angles.
+        delta_along -> along forearm (angle1); delta_lateral -> perpendicular (angle2).
+        scale: degrees per unit movement.
+        """
+        delta_along, delta_lateral, magnitude = movement[0], movement[1], movement[2]
+        step = scale * magnitude
+        angle1 = angle1 + delta_along * step
+        angle2 = angle2 + delta_lateral * step
+        return angle1, angle2, angle3
 
     def _send_command(self, angle1: float, angle2: float, angle3: float, gripper_force: float):
         if self.arduino.connected:
@@ -325,8 +361,12 @@ class SDataRobotController:
                 ret2, frame2 = cap2.read() if cap2 else (False, None)
                 frame2 = frame2 if ret2 and frame2 is not None else None
 
-                action = self._predict_action(frame1, frame2)
+                action, movement = self._predict_action(frame1, frame2)
                 angle1, angle2, angle3, gripper = self._action_to_command(action)
+                if movement is not None:
+                    angle1, angle2, angle3 = self._apply_movement_delta(
+                        angle1, angle2, angle3, movement
+                    )
                 self._send_command(angle1, angle2, angle3, gripper)
 
                 self.frame_count += 1
@@ -334,7 +374,8 @@ class SDataRobotController:
                     elapsed = time.time() - self.start_time
                     fps = self.frame_count / elapsed
                     action_name = f"part{action + 1}" if action < 8 else f"action_{action}"
-                    logger.info(f"Frame {self.frame_count} | FPS: {fps:.1f} | Action: {action} ({action_name}) | "
+                    mov_str = f" | mov=({movement[0]:.2f},{movement[1]:.2f},{movement[2]:.2f})" if movement is not None else ""
+                    logger.info(f"Frame {self.frame_count} | FPS: {fps:.1f} | Action: {action} ({action_name}){mov_str} | "
                                f"Angles: ({angle1:.0f}, {angle2:.0f}, {angle3:.0f}) | Gripper: {gripper:.0f}")
 
                 if duration and (time.time() - self.start_time) > duration:
