@@ -28,7 +28,7 @@ from mmfuse.encoders.audio_encoder import Wav2VecPooledEncoder
 from mmfuse.encoders.audio_encoder_whisper import WhisperAudioEncoder
 from mmfuse.encoders.sensor_encoder import PressureSensorEncoder, EMGSensorEncoder
 from mmfuse.fusion.multimodal_fusion import MultimodalFusionWithAttention
-from mmfuse.io.arduino_controller import ArduinoController, SensorBuffer
+from mmfuse.hardware_io.arduino_controller import ArduinoController, SensorBuffer
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)

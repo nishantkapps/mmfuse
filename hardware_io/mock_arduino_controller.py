@@ -234,7 +234,7 @@ def create_arduino_controller(mock_mode: bool = None, **kwargs) -> any:
         mock_kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
         return MockArduinoController(**mock_kwargs)
     else:
-        from io.arduino_controller import ArduinoController
+        from .arduino_controller import ArduinoController
         logger.info("Using REAL Arduino controller (hardware required)")
         # Only pass parameters that ArduinoController accepts
         allowed_keys = ['port', 'baud_rate', 'timeout', 'write_delay']

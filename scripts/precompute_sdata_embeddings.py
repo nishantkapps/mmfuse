@@ -165,15 +165,28 @@ def main():
         else:
             log.info("Using CPU (no GPU). For HPC: request GPU in your job, e.g. #SBATCH --gres=gpu:1")
 
-    from mmfuse.preprocessing.preprocessor import VisionPreprocessor, AudioPreprocessor
-    from mmfuse.encoders.vision_encoder import VisionEncoder
-    from mmfuse.encoders.vision_encoder_viscop import VisCoPVisionEncoder
-    from mmfuse.encoders.audio_encoder import Wav2VecPooledEncoder
-    from mmfuse.encoders.audio_encoder_whisper import WhisperAudioEncoder
+    try:
+        from mmfuse.preprocessing.preprocessor import VisionPreprocessor, AudioPreprocessor
+    except ModuleNotFoundError:
+        from preprocessing.preprocessor import VisionPreprocessor, AudioPreprocessor
+    try:
+        from mmfuse.encoders.vision_encoder import VisionEncoder
+        from mmfuse.encoders.vision_encoder_viscop import VisCoPVisionEncoder
+        from mmfuse.encoders.audio_encoder import Wav2VecPooledEncoder
+        from mmfuse.encoders.audio_encoder_whisper import WhisperAudioEncoder
+    except ModuleNotFoundError:
+        from encoders.vision_encoder import VisionEncoder
+        from encoders.vision_encoder_viscop import VisCoPVisionEncoder
+        from encoders.audio_encoder import Wav2VecPooledEncoder
+        from encoders.audio_encoder_whisper import WhisperAudioEncoder
 
     root = Path(args.dataset)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if (out_dir / 'config.json').exists() and any(out_dir.glob('*.pt')):
+        log.info("Embeddings already exist in %s. Skipping precompute.", out_dir)
+        return 0
 
     samples = build_sample_list(root, args.cross_pair, args.augment_variations)
     if not samples:

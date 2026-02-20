@@ -25,7 +25,7 @@ from encoders.sensor_encoder import PressureSensorEncoder, EMGSensorEncoder
 from fusion.multimodal_fusion import MultimodalFusion
 from mmfuse.ctrl.robotic_arm_controller import RoboticArmController3DOF
 from preprocessing.preprocessor import VisionPreprocessor, AudioPreprocessor
-from mmfuse.io.arduino_controller import ArduinoController, SensorBuffer
+from mmfuse.hardware_io.arduino_controller import ArduinoController, SensorBuffer
 # Avoid conflict with built-in 'io' module by importing directly from file path
 import sys
 

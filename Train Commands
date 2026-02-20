@@ -14,4 +14,6 @@ Train the Model
 ------------------------
 CUDA_VISIBLE_DEVICES=0,3 python -m mmfuse.training.train_sdata_attention --use-precomputed --embeddings-dir mmfuse/embeddings/sdata_viscop --cross-pair --epochs 10 --batch-size 32 --out-dir runs/sdata_viscop
 
+
+
  

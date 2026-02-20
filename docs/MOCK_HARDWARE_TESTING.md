@@ -48,7 +48,7 @@ python demo_mock_streaming.py --duration 30 --fps 30
 Use the factory function to seamlessly switch between mock and real hardware:
 
 ```python
-from io.mock_arduino_controller import create_arduino_controller
+from hardware_io.mock_arduino_controller import create_arduino_controller
 
 # Use mock hardware for testing
 arduino = create_arduino_controller(mock_mode=True)
@@ -102,7 +102,7 @@ emg[i] = baseline_emg[i] + motor_activity[i] * 100 +
 Use the factory `create_arduino_controller()` to select mock vs real hardware from configuration or explicitly via `mock_mode`.
 
 ```python
-from io.mock_arduino_controller import create_arduino_controller
+from hardware_io.mock_arduino_controller import create_arduino_controller
 
 # Create based on config (config/streaming_config.yaml -> arduino.mode)
 arduino = create_arduino_controller(noise_level=0.1)

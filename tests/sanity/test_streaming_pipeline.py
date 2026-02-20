@@ -172,7 +172,7 @@ def test_streaming_components():
     try:
         import sys
         sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-        from io.arduino_controller import ArduinoController, SensorBuffer
+        from hardware_io.arduino_controller import ArduinoController, SensorBuffer
         
         arduino = ArduinoController(port=None)  # No actual connection
         logger.info(f"  ✓ Arduino controller created")
