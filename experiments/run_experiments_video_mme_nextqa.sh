@@ -8,25 +8,12 @@ set -e
 cd "$(dirname "$0")/.."
 PROJ_ROOT="$(pwd)"
 
-find_checkpoint() {
-  latest=$(ls checkpoints/ckpt_sdata_epoch_*.pt 2>/dev/null | sort -V | tail -1)
-  [ -n "$latest" ] && echo "$latest" && return
-  latest=$(find runs -name "ckpt_sdata_epoch_*.pt" 2>/dev/null | sort -V | tail -1)
-  [ -n "$latest" ] && echo "$latest" && return
-  [ -f models/sdata_viscop/pytorch_model.bin ] && echo models/sdata_viscop/pytorch_model.bin && return
-  echo ""
-}
-
-CHECKPOINT="${CHECKPOINT:-$(find_checkpoint)}"
-if [ -z "$CHECKPOINT" ] || [ ! -f "$CHECKPOINT" ]; then
-  echo "No checkpoint found. Train first or set CHECKPOINT=path/to/ckpt.pt"
-  exit 1
-fi
+MODEL_FILE="${MODEL_FILE:-checkpoints/model.pt}"
 
 echo "=========================================="
 echo "VideoMME + NeXTQA Experiments"
 echo "=========================================="
-echo "Checkpoint: $CHECKPOINT"
+echo "Model file: $MODEL_FILE"
 echo "=========================================="
 
 # --- VideoMME ---
@@ -41,7 +28,7 @@ if [ -d "$VIDEOMME_DIR" ] && [ -f "$VIDEOMME_DIR/annotations.json" ]; then
   else
     echo "  Embeddings exist, skipping"
   fi
-  python experiments/run_dataset.py --dataset video_mme --checkpoint "$CHECKPOINT" --embeddings-dir "$EMB_VIDEOMME"
+  python experiments/run_dataset.py --dataset video_mme --checkpoint "$MODEL_FILE" --embeddings-dir "$EMB_VIDEOMME" --linear-probe
   echo "  VideoMME done."
 else
   echo "[1/4] VideoMME: SKIP (no data)"
@@ -59,7 +46,7 @@ if [ -f "$NEXTQA_DIR/annotations.json" ]; then
   else
     echo "  Embeddings exist, skipping"
   fi
-  python experiments/run_dataset.py --dataset nextqa --checkpoint "$CHECKPOINT" --embeddings-dir "$EMB_NEXTQA"
+  python experiments/run_dataset.py --dataset nextqa --checkpoint "$MODEL_FILE" --embeddings-dir "$EMB_NEXTQA" --linear-probe
   echo "  NeXTQA done."
 else
   echo "[2/4] NeXTQA: SKIP (no data)"
@@ -89,7 +76,7 @@ done
 # --- Paper comparison ---
 echo ""
 echo "[4/4] Running paper comparison..."
-python experiments/run_paper_comparisons.py --checkpoint "$CHECKPOINT"
+python experiments/run_paper_comparisons.py --checkpoint "$MODEL_FILE"
 
 echo ""
 echo "=========================================="

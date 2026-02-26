@@ -7,32 +7,22 @@
 # Prerequisites:
 #   - VisCoP embeddings: embeddings/video_mme, embeddings/nextqa, embeddings/charades, embeddings/sdata_viscop
 #   - MMFuse results: experiments/results/{video_mme,nextqa,charades}/results.json (from run_all_cross_dataset_experiments.sh)
-#   - MMFuse checkpoint for SData evaluation (optional)
+#   - checkpoints/model.pt for MMFuse SData evaluation
 #
 # Usage:
 #   ./experiments/run_all_paper_comparisons.sh
-#   CHECKPOINT=checkpoints/ckpt_sdata_epoch_5.pt ./experiments/run_all_paper_comparisons.sh
+#   MODEL_FILE=path/to/model.pt ./experiments/run_all_paper_comparisons.sh
 
 set -e
 cd "$(dirname "$0")/.."
 PROJ_ROOT="$(pwd)"
 
-# Find latest checkpoint
-find_checkpoint() {
-  latest=$(ls checkpoints/ckpt_sdata_epoch_*.pt 2>/dev/null | sort -V | tail -1)
-  [ -n "$latest" ] && echo "$latest" && return
-  latest=$(find runs -name "ckpt_sdata_epoch_*.pt" 2>/dev/null | sort -V | tail -1)
-  [ -n "$latest" ] && echo "$latest" && return
-  [ -f models/sdata_viscop/pytorch_model.bin ] && echo models/sdata_viscop/pytorch_model.bin && return
-  echo ""
-}
-
-CHECKPOINT="${CHECKPOINT:-$(find_checkpoint)}"
+MODEL_FILE="${MODEL_FILE:-checkpoints/model.pt}"
 
 echo "=========================================="
 echo "Paper Comparison Pipeline"
 echo "=========================================="
-echo "Checkpoint: ${CHECKPOINT:-none}"
+echo "Model file: $MODEL_FILE"
 echo "=========================================="
 
 # 1. Precompute CLIP embeddings
@@ -43,11 +33,7 @@ echo "[1/2] Precomputing CLIP embeddings..."
 # 2. Run paper comparison
 echo ""
 echo "[2/2] Running paper comparison..."
-if [ -n "$CHECKPOINT" ] && [ -f "$CHECKPOINT" ]; then
-  python experiments/run_paper_comparisons.py --checkpoint "$CHECKPOINT"
-else
-  python experiments/run_paper_comparisons.py
-fi
+python experiments/run_paper_comparisons.py --checkpoint "$MODEL_FILE"
 
 echo ""
 echo "=========================================="

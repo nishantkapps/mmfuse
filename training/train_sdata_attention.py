@@ -30,11 +30,71 @@ import cv2
 
 from mmfuse.preprocessing.preprocessor import VisionPreprocessor, AudioPreprocessor
 from mmfuse.encoders.vision_encoder import VisionEncoder
+from mmfuse.encoders.vision_encoder_viscop import VisCoPVisionEncoder
 from mmfuse.encoders.audio_encoder_learnable import AudioEncoder as LearnableAudioEncoder
 from mmfuse.encoders.audio_encoder import Wav2VecPooledEncoder
 from mmfuse.encoders.audio_encoder_whisper import WhisperAudioEncoder
 from mmfuse.encoders.sensor_encoder import PressureSensorEncoder, EMGSensorEncoder
 from mmfuse.fusion.multimodal_fusion import MultimodalFusionWithAttention
+
+try:
+    from config_modality import FUSION_DIM, get_modality_dims, AUDIO_DIM, TEXT_DIM, PRESSURE_DIM, EMG_DIM
+except ImportError:
+    import sys
+    _proj = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(_proj))
+    from config_modality import FUSION_DIM, get_modality_dims, AUDIO_DIM, TEXT_DIM, PRESSURE_DIM, EMG_DIM
+
+
+def _unfreeze_last_n_layers(encoder_module, n: int, encoder_kind: str):
+    """
+    Unfreeze only the last n transformer layers of an encoder. Rest stays frozen.
+    encoder_module: wrapper (e.g. VisCoPVisionEncoder, Wav2VecPooledEncoder) with .model.
+    encoder_kind: 'viscop' | 'clip' | 'wav2vec' | 'whisper'
+    Returns number of layers unfrozen (0 if structure not found).
+    """
+    if n <= 0:
+        return 0
+    # Ensure full encoder is frozen first
+    for p in encoder_module.parameters():
+        p.requires_grad = False
+    root = getattr(encoder_module, 'model', encoder_module)
+    layers = None
+    if encoder_kind == 'wav2vec':
+        # Wav2Vec2Model: .encoder.layers
+        if hasattr(root, 'encoder') and hasattr(root.encoder, 'layers'):
+            layers = root.encoder.layers
+    elif encoder_kind == 'whisper':
+        if hasattr(root, 'encoder') and hasattr(root.encoder, 'layers'):
+            layers = root.encoder.layers
+    elif encoder_kind == 'viscop':
+        # VisCoP / Qwen2-style: .model.model.layers, .model.layers, or .layers
+        if hasattr(root, 'model') and hasattr(root.model, 'model') and hasattr(root.model.model, 'layers'):
+            layers = root.model.model.layers
+        elif hasattr(root, 'model') and hasattr(root.model, 'layers'):
+            layers = root.model.layers
+        elif hasattr(root, 'layers'):
+            layers = root.layers
+    elif encoder_kind == 'clip':
+        # CLIP: .visual.transformer.resblocks or .transformer.resblocks
+        if hasattr(root, 'visual') and hasattr(root.visual, 'transformer'):
+            blocks = getattr(root.visual.transformer, 'resblocks', None) or getattr(root.visual.transformer, 'layers', None)
+            if blocks is not None:
+                layers = blocks
+        elif hasattr(root, 'transformer'):
+            blocks = getattr(root.transformer, 'resblocks', None) or getattr(root.transformer, 'layers', None)
+            if blocks is not None:
+                layers = blocks
+    if layers is None or not isinstance(layers, nn.ModuleList):
+        log.warning("Unfreeze last %d layers: no layer list found for %s (encoder may stay fully frozen)", n, encoder_kind)
+        return 0
+    total = len(layers)
+    take = min(n, total)
+    for i in range(total - take, total):
+        for p in layers[i].parameters():
+            p.requires_grad = True
+    log.info("Unfroze last %d layer(s) of %s (total %d)", take, encoder_kind, total)
+    return take
 
 
 def _get_audio_path(pdir: Path):
@@ -157,11 +217,14 @@ class PrecomputedSDataDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        data = torch.load(self.samples[idx], map_location='cpu', weights_only=True)
+        data = torch.load(self.samples[idx], weights_only=True)
+        # SData has no direct text; use zeros when "text" key missing (backward compat)
+        text_emb = data.get('text', torch.zeros(TEXT_DIM))
         return {
             'vision_camera1': data['vision_camera1'],
             'vision_camera2': data['vision_camera2'],
             'audio': data['audio'],
+            'text': text_emb,
             'target': data['target'],
         }
 
@@ -171,8 +234,9 @@ def build_embedding_precomputed(batch, device, encoders):
     v1 = torch.stack([s['vision_camera1'] for s in batch]).to(device).float()
     v2 = torch.stack([s['vision_camera2'] for s in batch]).to(device).float()
     a = torch.stack([s['audio'] for s in batch]).to(device).float()
+    txt = torch.stack([s['text'] for s in batch]).to(device).float()
     # Replace NaN/Inf with 0 to avoid training instability (e.g. from VisCoP)
-    for t in (v1, v2, a):
+    for t in (v1, v2, a, txt):
         t[~torch.isfinite(t)] = 0.0
     pressures = torch.zeros(len(batch), 2, device=device)
     emgs = torch.zeros(len(batch), 4, device=device)
@@ -184,6 +248,7 @@ def build_embedding_precomputed(batch, device, encoders):
         'vision_camera1': v1,
         'vision_camera2': v2,
         'audio': a,
+        'text': txt,
         'pressure': p_emb,
         'emg': e_emb,
     }
@@ -191,7 +256,7 @@ def build_embedding_precomputed(batch, device, encoders):
     return fused, kl_losses
 
 
-def build_embedding(batch, device, encoders):
+def build_embedding(batch, device, encoders, vision_encoder='clip'):
     vis_imgs = [s['frame'] for s in batch]
     vis_imgs2 = [s['frame2'] for s in batch]
     auds = [s['audio'] for s in batch]
@@ -199,11 +264,26 @@ def build_embedding(batch, device, encoders):
     pressures = [np.zeros((1, 2)) for _ in batch]
     emgs = [np.zeros((1, 4)) for _ in batch]
 
-    vprep = VisionPreprocessor()
-    vis_tensors = [vprep.preprocess(img) for img in vis_imgs]
-    vis_batch = torch.stack(vis_tensors).to(device)
-    vis2_tensors = [vprep.preprocess(img) for img in vis_imgs2]
-    vis2_batch = torch.stack(vis2_tensors).to(device)
+    if vision_encoder == 'viscop':
+        # VisCoP expects (B, 3, H, W) in [0, 1]; resize to 224x224, no ImageNet norm
+        def to_viscop(imgs):
+            out = []
+            for img in imgs:
+                if isinstance(img, np.ndarray):
+                    img = cv2.resize(img, (224, 224))
+                    t = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+                else:
+                    t = img
+                out.append(t)
+            return torch.stack(out).to(device)
+        vis_batch = to_viscop(vis_imgs)
+        vis2_batch = to_viscop(vis_imgs2)
+    else:
+        vprep = VisionPreprocessor()
+        vis_tensors = [vprep.preprocess(img) for img in vis_imgs]
+        vis_batch = torch.stack(vis_tensors).to(device)
+        vis2_tensors = [vprep.preprocess(img) for img in vis_imgs2]
+        vis2_batch = torch.stack(vis2_tensors).to(device)
 
     aprep = AudioPreprocessor()
     target_samples = int(aprep.duration * aprep.sample_rate)
@@ -230,10 +310,13 @@ def build_embedding(batch, device, encoders):
         p_emb = encoders['pressure'](pressure_batch.unsqueeze(0)) if pressure_batch.dim() == 1 else encoders['pressure'](pressure_batch)
         e_emb = encoders['emg'](emg_batch.unsqueeze(0)) if emg_batch.dim() == 1 else encoders['emg'](emg_batch)
 
+    # SData has no direct text input; pass zeros for text modality
+    text_zeros = torch.zeros(len(batch), TEXT_DIM, device=device)
     embeddings = {
         'vision_camera1': v_emb1,
         'vision_camera2': v_emb2,
         'audio': a_emb,
+        'text': text_zeros,
         'pressure': p_emb,
         'emg': e_emb,
     }
@@ -304,7 +387,7 @@ def train(args):
         ds = PrecomputedSDataDataset(emb_dir, emb_config)
         num_classes = emb_config.get('num_classes', 8)
         vision_dim = emb_config['vision_dim']
-        audio_dim = emb_config.get('audio_dim', 768)
+        audio_dim = emb_config.get('audio_dim', AUDIO_DIM)
         build_emb_fn = build_embedding_precomputed
     else:
         log.info("Loading dataset from %s ...", args.dataset)
@@ -317,18 +400,27 @@ def train(args):
         if len(ds) == 0:
             raise RuntimeError(f"No samples found in {args.dataset}. Expected partX/participant_id/*_c1_*.mp4, *_c2_*.mp4")
         num_classes = ds.num_classes
-        vision_dim = 512  # CLIP
-        audio_dim = 768
-        build_emb_fn = build_embedding
+        vision_encoder = getattr(args, 'vision_encoder', 'clip')
+        modality_dims_raw = get_modality_dims(vision_encoder)
+        vision_dim = modality_dims_raw['vision_camera1']
+        audio_dim = modality_dims_raw['audio']
+        build_emb_fn = lambda b, d, e: build_embedding(b, d, e, vision_encoder=getattr(args, 'vision_encoder', 'clip'))
 
-    # 90/10 stratified train/test split (split BEFORE augmentation to avoid leakage)
+    # Train/test split: before augmentation (precomputed: use train_count/test_count; raw: split by pairs)
     from sklearn.model_selection import train_test_split
     if use_precomputed:
-        labels = [torch.load(p, map_location='cpu', weights_only=True)['target'] for p in ds.samples]
-        train_idx, test_idx = train_test_split(
-            range(len(ds)), test_size=0.1, stratify=labels, random_state=42
-        )
-        log.warning("Precomputed: split-after-augmentation (cannot split before augmentation without metadata)")
+        train_count = emb_config.get('train_count')
+        test_count = emb_config.get('test_count')
+        if train_count is not None and test_count is not None and train_count + test_count == len(ds.samples):
+            train_idx = list(range(0, train_count))
+            test_idx = list(range(train_count, train_count + test_count))
+            log.info("Precomputed: using split-before-augmentation (train=%d test=%d)", train_count, test_count)
+        else:
+            labels = [torch.load(p, weights_only=True)['target'] for p in ds.samples]
+            train_idx, test_idx = train_test_split(
+                range(len(ds)), test_size=0.1, stratify=labels, random_state=42
+            )
+            log.warning("Precomputed: no train_count/test_count in config; split by label (re-run precompute for split-before-aug)")
     else:
         # Split by base (cam1, cam2) first; train gets all augmentations, test gets v=0 only
         pair_to_label = {}
@@ -362,52 +454,91 @@ def train(args):
     log.info("Dataset: %d samples (%d per part), %d classes", len(ds), n_per_part, num_classes)
     log.info("Train: %d | Test: %d (90/10 split)", len(train_idx), len(test_idx))
 
-    log.info("Building model (vision_dim=%d, audio_dim=%d, fusion) ...", vision_dim, audio_dim)
+    if use_precomputed:
+        log.info("Building model (vision_dim=%d, audio_dim=%d from precomputed, fusion) ...", vision_dim, audio_dim)
+    else:
+        log.info("Building model (vision_dim=%d, audio_dim=%d, fusion) ...", vision_dim, audio_dim)
+        if getattr(args, 'finetune_encoders', False) and not args.freeze_encoders:
+            uv = getattr(args, 'unfreeze_vision_layers', 0)
+            ua = getattr(args, 'unfreeze_audio_layers', 0)
+            if uv > 0 or ua > 0:
+                log.info("--finetune-encoders: unfreezing last %d vision / %d audio layer(s) only", uv or 0, ua or 0)
+            else:
+                log.info("--finetune-encoders: vision and audio encoders will be trained (all layers unfrozen)")
 
     movement_targets = load_movement_targets(args.movement_config, num_classes).to(device)
 
-    pressure = PressureSensorEncoder(output_dim=256, input_features=2).to(device)
-    emg = EMGSensorEncoder(output_dim=256, num_channels=3, input_features=4).to(device)
+    pressure = PressureSensorEncoder(output_dim=PRESSURE_DIM, input_features=2).to(device)
+    emg = EMGSensorEncoder(output_dim=EMG_DIM, num_channels=3, input_features=4).to(device)
 
-    modality_dims = {
-        'vision_camera1': vision_dim,
-        'vision_camera2': vision_dim,
-        'audio': audio_dim,
-        'pressure': 256,
-        'emg': 256,
-    }
+    modality_dims = get_modality_dims(getattr(args, 'vision_encoder', 'clip'))
+    modality_dims = {**modality_dims, 'vision_camera1': vision_dim, 'vision_camera2': vision_dim, 'audio': audio_dim}
+    fusion_dim = getattr(args, 'fusion_dim', FUSION_DIM)
     fusion = MultimodalFusionWithAttention(
         modality_dims=modality_dims,
-        fusion_dim=args.fusion_dim,
+        fusion_dim=fusion_dim,
         num_heads=args.num_heads,
         dropout=args.dropout
     ).to(device)
 
     if not use_precomputed:
-        vision = VisionEncoder(device=str(device)).to(device)
+        # When --finetune-encoders (and not --freeze-encoders): unfreeze vision/audio for finetuning.
+        # If --unfreeze-vision-layers N or --unfreeze-audio-layers N (N>0), only last N layers are unfrozen to limit params.
+        finetune_enc = getattr(args, 'finetune_encoders', False) and not args.freeze_encoders
+        unfreeze_vis_n = max(0, getattr(args, 'unfreeze_vision_layers', 0))
+        unfreeze_aud_n = max(0, getattr(args, 'unfreeze_audio_layers', 0))
+        # Create vision frozen if: not finetuning, or finetuning with "last N layers" (we unfreeze after)
+        freeze_vision = not finetune_enc or (unfreeze_vis_n > 0)
+        # Audio: same; for learnable encoder "last N layers" has no effect so we unfreeze all when finetuning
+        freeze_audio = not finetune_enc or (unfreeze_aud_n > 0 and args.audio_encoder in ('wav2vec', 'whisper'))
+        if getattr(args, 'vision_encoder', 'clip') == 'viscop':
+            vision = VisCoPVisionEncoder(
+                model_path="viscop_trained_models/viscop_qwen2.5_7b_viscop-lora_egocentric-expert",
+                device=str(device),
+                frozen=freeze_vision,
+            ).to(device)
+        else:
+            vision = VisionEncoder(device=str(device)).to(device)
+            if freeze_vision:
+                for p in vision.parameters():
+                    p.requires_grad = False
         if args.audio_encoder == 'wav2vec':
-            audio = Wav2VecPooledEncoder(frozen=True, device=str(device)).to(device)
+            audio = Wav2VecPooledEncoder(frozen=freeze_audio, device=str(device)).to(device)
         elif args.audio_encoder == 'whisper':
-            audio = WhisperAudioEncoder(frozen=True, device=str(device)).to(device)
+            audio = WhisperAudioEncoder(frozen=freeze_audio, device=str(device)).to(device)
         else:
             audio = LearnableAudioEncoder(device=str(device)).to(device)
+            if freeze_audio:
+                for p in audio.parameters():
+                    p.requires_grad = False
         if args.freeze_encoders:
             for m in [vision, audio, pressure, emg]:
                 for p in m.parameters():
                     p.requires_grad = False
+        # Unfreeze only last N layers when requested (vision/audio created frozen above)
+        if finetune_enc and unfreeze_vis_n > 0:
+            _unfreeze_last_n_layers(vision, unfreeze_vis_n, 'viscop' if getattr(args, 'vision_encoder', 'clip') == 'viscop' else 'clip')
+        if finetune_enc and unfreeze_aud_n > 0 and args.audio_encoder in ('wav2vec', 'whisper'):
+            _unfreeze_last_n_layers(audio, unfreeze_aud_n, args.audio_encoder)
         encoders = {'vision': vision, 'audio': audio, 'pressure': pressure, 'emg': emg, 'fusion': fusion}
     else:
         encoders = {'pressure': pressure, 'emg': emg, 'fusion': fusion}
 
-    model = ActionClassifier(embedding_dim=args.fusion_dim, num_classes=num_classes).to(device)
-    movement_head = MovementHead(embedding_dim=args.fusion_dim).to(device)
+    model = ActionClassifier(embedding_dim=fusion_dim, num_classes=num_classes).to(device)
+    movement_head = MovementHead(embedding_dim=fusion_dim).to(device)
     trainable_params = list(model.parameters()) + list(fusion.parameters()) + list(movement_head.parameters())
+    if not use_precomputed and getattr(args, 'finetune_encoders', False) and not args.freeze_encoders:
+        trainable_params += list(vision.parameters()) + list(audio.parameters())
     optimizer = torch.optim.Adam(trainable_params, lr=args.lr)
     criterion = nn.CrossEntropyLoss()
 
+    modality_names = list(modality_dims.keys())
     print("\n" + "=" * 60)
     print("MODEL: MultimodalFusionWithAttention + ActionClassifier (sdata)")
     print("=" * 60)
+    print("\n--- Modalities in fusion: {}".format(", ".join(modality_names)))
+    if use_precomputed:
+        print("     (vision_camera1, vision_camera2, audio, text from precomputed embeddings; no encoder modules)")
     print("\n--- Fusion pipeline (forward flow)")
     print("  1. Projections:  modality_emb -> Linear+BN+ReLU -> fusion_dim (per modality)")
     print("  2. KL Divergence (knowledge distillation):")
@@ -428,9 +559,11 @@ def train(args):
         ("movement_head", movement_head),
     ]
     if not use_precomputed:
-        components.insert(0, ("vision (CLIP)", vision))
+        components.insert(0, (f"vision ({getattr(args, 'vision_encoder', 'clip')})", vision))
         components.insert(1, (f"audio ({args.audio_encoder})", audio))
     print("\n--- Parameter counts")
+    if use_precomputed:
+        print("  vision_camera1, vision_camera2, audio, text: from precomputed embeddings (no encoder parameters)")
     total_all, trainable_all = 0, 0
     for name, m in components:
         t, tr = _count(m)
@@ -543,7 +676,7 @@ def train(args):
         history['epoch_sec'].append(epoch_sec)
 
         audio_enc = emb_config.get('audio_encoder', args.audio_encoder) if emb_config else args.audio_encoder
-        vision_enc = emb_config.get('vision_encoder', 'clip') if emb_config else 'clip'
+        vision_enc = emb_config.get('vision_encoder', getattr(args, 'vision_encoder', 'clip')) if emb_config else getattr(args, 'vision_encoder', 'clip')
         ckpt = {
             'model_state': model.state_dict(),
             'fusion_state': fusion.state_dict(),
@@ -554,11 +687,30 @@ def train(args):
             'audio_encoder': audio_enc,
             'vision_encoder': vision_enc,
             'vision_dim': vision_dim,
-            'fusion_dim': args.fusion_dim,
+            'fusion_dim': fusion_dim,
         }
         ckpt_path = os.path.join(args.out_dir, f'ckpt_sdata_epoch_{epoch+1}.pt')
         torch.save(ckpt, ckpt_path)
         log.info("Checkpoint saved: %s", ckpt_path)
+
+    # Update canonical model file once at end so finetuning can use the same path every time
+    if getattr(args, 'model_file', None):
+        model_path = args.model_file
+        os.makedirs(os.path.dirname(model_path) or '.', exist_ok=True)
+        final_ckpt = {
+            'model_state': model.state_dict(),
+            'fusion_state': fusion.state_dict(),
+            'movement_state': movement_head.state_dict(),
+            'movement_targets': movement_targets.cpu(),
+            'num_classes': num_classes,
+            'epoch': args.epochs,
+            'audio_encoder': audio_enc,
+            'vision_encoder': vision_enc,
+            'vision_dim': vision_dim,
+            'fusion_dim': fusion_dim,
+        }
+        torch.save(final_ckpt, model_path)
+        log.info("Model file updated: %s", model_path)
 
     total_train_sec = sum(epoch_times)
     history_path = os.path.join(args.out_dir, 'training_history.json')
@@ -573,24 +725,32 @@ def train(args):
 
 def main():
     p = argparse.ArgumentParser()
-    _default_dataset = str(Path(__file__).resolve().parent.parent / 'dataset' / 'sdata')
-    p.add_argument('--dataset', default=_default_dataset, help='Path to sdata folder')
-    p.add_argument('--out-dir', default='checkpoints', help='Where to save checkpoints')
+    p.add_argument('--dataset', default='dataset/sdata', help='Path to sdata folder (relative to cwd)')
+    p.add_argument('--out-dir', default='checkpoints', help='Where to save checkpoints (relative to cwd)')
     p.add_argument('--epochs', type=int, default=5)
     p.add_argument('--batch-size', type=int, default=4)
     p.add_argument('--lr', type=float, default=1e-4)
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu',
                    help='Device (default: cuda if available)')
-    p.add_argument('--freeze-encoders', action='store_true')
+    p.add_argument('--freeze-encoders', action='store_true',
+                   help='Freeze all encoders (vision, audio, pressure, emg). Ignored if --use-precomputed.')
+    p.add_argument('--finetune-encoders', action='store_true',
+                   help='Train vision and audio encoders (unfreeze). Use for finetuning on other datasets. Ignored if --use-precomputed or --freeze-encoders.')
+    p.add_argument('--unfreeze-vision-layers', type=int, default=0, metavar='N',
+                   help='With --finetune-encoders: unfreeze only last N vision encoder layers (0 = unfreeze all). E.g. 1 or 2 to limit trainable params.')
+    p.add_argument('--unfreeze-audio-layers', type=int, default=0, metavar='N',
+                   help='With --finetune-encoders: unfreeze only last N audio encoder layers (0 = unfreeze all). E.g. 1 or 2 to limit trainable params.')
     p.add_argument('--kl-weight', type=float, default=0.1)
     p.add_argument('--num-heads', type=int, default=8)
     p.add_argument('--dropout', type=float, default=0.2)
     p.add_argument('--cross-pair', action='store_true', help='Pair each audio with all video pairs in same part (larger dataset)')
     p.add_argument('--augment-variations', type=int, default=16, help='Video augmentations per sample (default 16)')
+    p.add_argument('--vision-encoder', choices=['clip', 'viscop'], default='clip',
+                   help='Vision encoder: CLIP (512-dim) or VisCoP (3584-dim). For precomputed, use embeddings from precompute_sdata_embeddings.py --vision-encoder viscop')
     p.add_argument('--audio-encoder', choices=['learnable', 'wav2vec', 'whisper'], default='wav2vec',
-                   help='Audio encoder: learnable CNN, wav2vec2-base (frozen), or whisper-small (frozen)')
-    p.add_argument('--fusion-dim', type=int, default=256,
-                   help='Fusion embedding dim (default 256; use 512 for original, smaller = fewer params)')
+                   help='Audio encoder: learnable CNN, wav2vec2-base, or whisper-small. Use --finetune-encoders to train (else frozen).')
+    p.add_argument('--fusion-dim', type=int, default=FUSION_DIM,
+                   help='Fusion embedding dim (default from config_modality.py, use 512 for finetune compatibility)')
     p.add_argument('--use-precomputed', action='store_true',
                    help='Use precomputed embeddings (run scripts/precompute_sdata_embeddings.py first)')
     p.add_argument('--embeddings-dir', type=str, default=None,
@@ -599,10 +759,22 @@ def main():
                    help='YAML mapping action_id -> (delta_along, delta_lateral, magnitude)')
     p.add_argument('--movement-weight', type=float, default=0.5,
                    help='Weight for movement loss (L = L_action + weight * L_movement)')
+    p.add_argument('--model-file', type=str, default=None,
+                   help='Path to canonical model file. After training, save final checkpoint here (e.g. checkpoints/model.pt) so finetuning can always use this path.')
     args = p.parse_args()
 
     if args.use_precomputed and not args.embeddings_dir:
         p.error('--embeddings-dir required when --use-precomputed')
+
+    # Resolve relative paths from cwd (where you run the command)
+    cwd = Path.cwd()
+    args.dataset = str(cwd / args.dataset) if not os.path.isabs(args.dataset) else args.dataset
+    args.out_dir = str(cwd / args.out_dir) if not os.path.isabs(args.out_dir) else args.out_dir
+    if getattr(args, 'embeddings_dir', None):
+        args.embeddings_dir = str(cwd / args.embeddings_dir) if not os.path.isabs(args.embeddings_dir) else args.embeddings_dir
+    if getattr(args, 'model_file', None):
+        args.model_file = str(cwd / args.model_file) if not os.path.isabs(args.model_file) else args.model_file
+    args.movement_config = str(cwd / args.movement_config) if not os.path.isabs(args.movement_config) else args.movement_config
 
     os.makedirs(args.out_dir, exist_ok=True)
     train(args)

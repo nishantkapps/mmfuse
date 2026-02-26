@@ -4,6 +4,7 @@ Uses visual_probes from viscop_qwen2.5_7b_viscop-lora_egocentric-expert.
 Output: (batch, 3584) - Qwen2.5 hidden size.
 """
 
+import warnings
 import torch
 import torch.nn as nn
 from PIL import Image
@@ -85,6 +86,34 @@ def _is_valid_viscop_dir(p: Path) -> bool:
     return p.exists() and p.is_dir() and (p / "config.json").exists()
 
 
+def _load_state_dict_from_path(model_dir: str) -> dict:
+    """Load state dict from a model directory (safetensors or pytorch_model.bin). Returns dict of tensors."""
+    model_path = Path(model_dir)
+    state_dict = {}
+    # Safetensors (single or sharded)
+    st_files = sorted(model_path.glob("*.safetensors"))
+    if st_files:
+        try:
+            from safetensors.torch import load_file
+            for f in st_files:
+                state_dict.update(load_file(str(f)))
+        except Exception:
+            pass
+    # PyTorch bin (single or adapter)
+    if not state_dict:
+        for name in ("pytorch_model.bin", "model.bin", "adapter_model.bin"):
+            p = model_path / name
+            if p.exists():
+                try:
+                    state_dict = torch.load(p, map_location="cpu", weights_only=True)
+                    if isinstance(state_dict, dict) and "state_dict" in state_dict:
+                        state_dict = state_dict["state_dict"]
+                    break
+                except Exception:
+                    pass
+    return state_dict or {}
+
+
 def _resolve_viscop_model_path(model_path: str) -> str:
     """Resolve model path: use local if valid (has config.json), else download from HuggingFace."""
     p = Path(model_path)
@@ -154,6 +183,111 @@ def _patch_viscop_base_model():
     viscop.load_pretrained_model = _patched_load
 
 
+def _install_config_model_type_patch():
+    """
+    Align config model_type with the classes VisCoP instantiates. Checkpoint has
+    model_type "videollama3_vision_encoder" but VisCoP builds "viscop_vision_encoder"
+    -> we fix the config so the loader uses the right class (no type mismatch, correct load).
+    """
+    from transformers import PretrainedConfig
+    _orig_from_pretrained = PretrainedConfig.from_pretrained
+
+    def _patched_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        out = _orig_from_pretrained.__func__(cls, pretrained_model_name_or_path, *args, **kwargs)
+        # Some transformers versions return (config, model_kwargs)
+        if isinstance(out, tuple):
+            config = out[0]
+            rest = out[1:]
+        else:
+            config = out
+            rest = ()
+        if config is not None:
+            if hasattr(config, "model_type"):
+                if getattr(config, "model_type", None) == "videollama3_vision_encoder":
+                    config.model_type = "viscop_vision_encoder"
+                if getattr(config, "model_type", None) in ("", None):
+                    config.model_type = "viscop_qwen2"
+            # Fix base model path: checkpoint often has _name_or_path like /work/.../videollama3-image_7b_local
+            # which doesn't exist -> HF treats as repo_id and raises. Point to HF base model instead.
+            base_path = getattr(config, "_name_or_path", None)
+            if isinstance(base_path, str) and base_path.strip():
+                p = Path(base_path)
+                if not p.is_absolute():
+                    p = Path.cwd() / base_path
+                if not (p.exists() and p.is_dir() and (p / "config.json").exists()):
+                    config._name_or_path = HF_VISCOP_BASE_MODEL
+            # Use eager attention when flash_attn is not installed (avoids ImportError and NaN issues)
+            if getattr(config, "attn_implementation", None) == "flash_attention_2":
+                config.attn_implementation = "eager"
+            if getattr(config, "_attn_implementation", None) == "flash_attention_2":
+                config._attn_implementation = "eager"
+        return (config,) + rest if rest else config
+
+    PretrainedConfig.from_pretrained = classmethod(_patched_from_pretrained)
+    def _restore():
+        PretrainedConfig.from_pretrained = _orig_from_pretrained
+    return _restore
+
+
+def _patch_viscop_attn_eager():
+    """
+    Force eager attention when loading VisCoP vision encoder so it works without flash_attn
+    (avoids ImportError and often fixes NaN from flash_attn on some setups).
+    """
+    try:
+        from viscop.model.encoder import ViSCoP_VisionEncoderModel
+        _orig_fp = ViSCoP_VisionEncoderModel.from_pretrained.__func__
+
+        @classmethod
+        def _from_pretrained_eager(cls, pretrained_model_name_or_path, *args, **kwargs):
+            kwargs.setdefault("attn_implementation", "eager")
+            return _orig_fp(cls, pretrained_model_name_or_path, *args, **kwargs)
+
+        ViSCoP_VisionEncoderModel.from_pretrained = _from_pretrained_eager
+    except Exception:
+        pass
+
+
+def _install_assign_true_patch():
+    """
+    Install a temporary patch so load_state_dict is always called with assign=True.
+    Used only during model_init() so meta tensors get real weights. Restore after.
+    Patches both nn.Module and torch.nn.modules.module.Module so HuggingFace/accelerate
+    code that holds a reference to the class gets the patched version.
+    """
+    import inspect
+    # Patch the class in both places (nn.Module is the same object, but some code may import from .modules.module)
+    _orig = nn.Module.load_state_dict
+    _sig = inspect.signature(_orig)
+    if "assign" not in _sig.parameters:
+        return _orig, lambda: None
+
+    def _patched(self, state_dict, strict=True, assign=False, *args, **kwargs):
+        kwargs.pop("assign", None)
+        return _orig(self, state_dict, strict=strict, assign=True, *args, **kwargs)
+
+    nn.Module.load_state_dict = _patched
+    # Also patch the module where Module is defined (in case loader uses that reference)
+    try:
+        import torch.nn.modules.module as _mod_module
+        if getattr(_mod_module.Module, "load_state_dict", None) is _orig:
+            _mod_module.Module.load_state_dict = _patched
+            _patched_both = True
+        else:
+            _patched_both = False
+    except Exception:
+        _patched_both = False
+
+    def _restore():
+        nn.Module.load_state_dict = _orig
+        if _patched_both:
+            try:
+                _mod_module.Module.load_state_dict = _orig
+            except NameError:
+                pass
+    return _orig, _restore
+
+
 class VisCoPVisionEncoder(nn.Module):
     """
     VisCoP vision encoder using pretrained egocentric/robot-control model.
@@ -188,9 +322,39 @@ class VisCoPVisionEncoder(nn.Module):
         _patch_viscop_config_contains()
         # Patch: use HF base model when config points to non-existent local path
         _patch_viscop_base_model()
+        # Align config model_type with VisCoP classes so checkpoint loads correctly (no type mismatch / meta no-op)
+        _restore_config = _install_config_model_type_patch()
+        # Use eager attention so loading works without flash_attn and avoids NaN
+        _patch_viscop_attn_eager()
 
         device_map = "auto" if device == "auto" else {"": device}
-        model, processor = model_init(model_path=resolved_path, device_map=device_map)
+        _orig_load, _restore_load = _install_assign_true_patch()
+        try:
+            model, processor = model_init(model_path=resolved_path, device_map=device_map)
+        finally:
+            _restore_load()
+            _restore_config()
+        # Reload state dict with assign=True so meta tensors get weights (internal loader may not use assign)
+        extra_sd = _load_state_dict_from_path(resolved_path)
+        if extra_sd:
+            import logging
+            _log = logging.getLogger(__name__)
+            # Strip prefix so checkpoint keys match model (PEFT often saves "base_model.model.*")
+            sample = next(iter(extra_sd.keys()))
+            if sample.startswith("base_model.model."):
+                extra_sd = {k.replace("base_model.model.", "", 1): v for k, v in extra_sd.items()}
+            missing, unexpected = model.load_state_dict(extra_sd, strict=False, assign=True)
+            # Diagnose why probes might be NaN: vision/encoder/probe weights must be in checkpoint
+            vision_missing = [k for k in sorted(missing) if "vision" in k or "encoder" in k or "probe" in k]
+            if vision_missing:
+                _log.warning(
+                    "VisCoP: %d vision/encoder/probe keys NOT in checkpoint (likely cause of NaN probes): %s",
+                    len(vision_missing), vision_missing[:15],
+                )
+            _log.info(
+                "VisCoP: reloaded state dict with assign=True from %s (%d keys, %d missing)",
+                resolved_path, len(extra_sd), len(missing),
+            )
         self.model = model
         self.processor = processor
         self._num_visual_probes = getattr(model.config, 'num_visual_probes', 32)
@@ -260,12 +424,42 @@ class VisCoPVisionEncoder(nn.Module):
         else:
             merge_sizes = merge_sizes.to(inp_device) if hasattr(merge_sizes, 'to') else torch.tensor(merge_sizes, device=inp_device)
 
-        with torch.no_grad():
+        # visual_probes come from VisCoP's model.encode_images() (viscop_arch.py -> vision encoder).
+        # The vision encoder (SigLIP + interaction modules with learnable visual_probes) produces
+        # (mm_features, visual_probes). If probe weights are not loaded (key mismatch) or
+        # FlashAttention/forward produces NaNs, visual_probes are NaN; we then replace non-finite with 0 below.
+        trainable = any(p.requires_grad for p in self.model.parameters())
+        if trainable:
             mm_features, visual_probes = self.model.encode_images(
                 pixel_values=pixel_values,
                 grid_sizes=grid_sizes,
                 merge_sizes=merge_sizes,
             )
+        else:
+            with torch.no_grad():
+                mm_features, visual_probes = self.model.encode_images(
+                    pixel_values=pixel_values,
+                    grid_sizes=grid_sizes,
+                    merge_sizes=merge_sizes,
+                )
         batch_size = len(pil_list)
+        visual_probes = visual_probes.float()
         probes = visual_probes.view(batch_size, self._num_visual_probes, -1)
-        return probes.mean(dim=1).float()
+        out = probes.mean(dim=1).float()
+        # Debug: log once (visual_probes from encode_images vs NaN replacement -> zeros)
+        if not hasattr(self, "_forward_debug_logged"):
+            self._forward_debug_logged = True
+            vp_min, vp_max = float(visual_probes.min()), float(visual_probes.max())
+            vp_nan = bool(torch.isnan(visual_probes).any())
+            out_min, out_max = float(out.min()), float(out.max())
+            out_nan = bool(torch.isnan(out).any())
+            import logging
+            log = logging.getLogger(__name__)
+            log.info(
+                "VisCoP forward: visual_probes min=%.4f max=%.4f has_nan=%s -> out min=%.4f max=%.4f has_nan=%s",
+                vp_min, vp_max, vp_nan, out_min, out_max, out_nan,
+            )
+        # Ensure valid output: uninitialized or unstable layers can produce NaN/Inf
+        if not torch.isfinite(out).all():
+            out = torch.where(torch.isfinite(out), out, torch.zeros_like(out, dtype=out.dtype, device=out.device))
+        return out

@@ -107,6 +107,7 @@ def _recompute_metrics_for_ablation(
         "vision_camera1": vision_dim,
         "vision_camera2": vision_dim,
         "audio": audio_dim,
+        "text": 768,
         "pressure": 256,
         "emg": 256,
     }

@@ -58,10 +58,12 @@ class PrecomputedSDataDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         data = torch.load(self.samples[idx], map_location='cpu', weights_only=True)
+        text_emb = data.get('text', torch.zeros(768))
         return {
             'vision_camera1': data['vision_camera1'],
             'vision_camera2': data['vision_camera2'],
             'audio': data['audio'],
+            'text': text_emb,
             'target': data['target'],
         }
 
@@ -70,7 +72,8 @@ def build_embedding_precomputed(batch, device, encoders):
     v1 = torch.stack([s['vision_camera1'] for s in batch]).to(device).float()
     v2 = torch.stack([s['vision_camera2'] for s in batch]).to(device).float()
     a = torch.stack([s['audio'] for s in batch]).to(device).float()
-    for t in (v1, v2, a):
+    txt = torch.stack([s['text'] for s in batch]).to(device).float()
+    for t in (v1, v2, a, txt):
         t[~torch.isfinite(t)] = 0.0
     pressures = torch.zeros(len(batch), 2, device=device)
     emgs = torch.zeros(len(batch), 4, device=device)
@@ -80,6 +83,7 @@ def build_embedding_precomputed(batch, device, encoders):
         'vision_camera1': v1,
         'vision_camera2': v2,
         'audio': a,
+        'text': txt,
         'pressure': p_emb,
         'emg': e_emb,
     }
@@ -145,6 +149,7 @@ def main():
         'vision_camera1': vision_dim,
         'vision_camera2': vision_dim,
         'audio': audio_dim,
+        'text': 768,
         'pressure': 256,
         'emg': 256,
     }

@@ -2,16 +2,19 @@
 """
 Run MMFuse model evaluation on a single cross-dataset benchmark.
 Expects precomputed embeddings in embeddings/<dataset>/ with config.json and *.pt files.
-Format: each .pt has vision_camera1, vision_camera2, audio (or text as 768-dim), target.
+Format: each .pt has vision_camera1, vision_camera2, audio (768), text (768, direct text input), target.
+QA datasets: audio=zeros, text=encoded; SData: text=zeros (or missing, default zeros).
 
 Evaluation modes:
-- zero-shot: Use SData-trained classifier (only works for SData; cross-dataset gets ~0-25%).
-- linear-probe: Train a linear classifier on fused embeddings (measures representation transfer).
-  Use for cross-dataset to get meaningful accuracy (can approach VisCoP-level transfer).
+- zero-shot (default): Use the checkpoint's classification head. Use this when the model was
+  trained or finetuned on this dataset (SData or finetuned cross-dataset). Direct prediction.
+- linear-probe: Train a linear classifier on frozen fused embeddings. Use only when measuring
+  transfer from a single SData checkpoint without finetuning (one model, many datasets).
 
 Usage:
-  python experiments/run_dataset.py --dataset video_mme --checkpoint path/to/model.pt --linear-probe
-  python experiments/run_dataset.py --dataset sdata --checkpoint path/to/model.pt  # zero-shot for SData
+  python experiments/run_dataset.py --dataset video_mme --checkpoint path/to/finetuned.pt   # zero-shot
+  python experiments/run_dataset.py --dataset video_mme --checkpoint path/to/model.pt --linear-probe  # transfer
+  python experiments/run_dataset.py --dataset sdata --checkpoint path/to/model.pt
 """
 
 import argparse
@@ -29,6 +32,8 @@ from torch.utils.data import DataLoader, Subset
 
 _proj_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_proj_root))
+
+from config_modality import get_modality_dims, PRESSURE_DIM, EMG_DIM, TEXT_DIM
 
 try:
     from mmfuse.encoders.sensor_encoder import PressureSensorEncoder, EMGSensorEncoder
@@ -57,10 +62,13 @@ class PrecomputedDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         data = torch.load(self.samples[idx], map_location="cpu", weights_only=True)
+        # Direct text input stored in "text"; backward compat: default zeros when missing
+        text_emb = data.get("text", torch.zeros(TEXT_DIM))
         return {
             "vision_camera1": data["vision_camera1"],
             "vision_camera2": data["vision_camera2"],
             "audio": data["audio"],
+            "text": text_emb,
             "target": data["target"],
         }
 
@@ -69,7 +77,8 @@ def build_embedding(batch, device, encoders):
     v1 = torch.stack([s["vision_camera1"] for s in batch]).to(device).float()
     v2 = torch.stack([s["vision_camera2"] for s in batch]).to(device).float()
     a = torch.stack([s["audio"] for s in batch]).to(device).float()
-    for t in (v1, v2, a):
+    txt = torch.stack([s["text"] for s in batch]).to(device).float()
+    for t in (v1, v2, a, txt):
         t[~torch.isfinite(t)] = 0.0
     pressures = torch.zeros(len(batch), 2, device=device)
     emgs = torch.zeros(len(batch), 4, device=device)
@@ -79,6 +88,7 @@ def build_embedding(batch, device, encoders):
         "vision_camera1": v1,
         "vision_camera2": v2,
         "audio": a,
+        "text": txt,
         "pressure": p_emb,
         "emg": e_emb,
     }
@@ -107,8 +117,10 @@ class MovementHead(torch.nn.Module):
 def run_evaluation(emb_dir: Path, ckpt_path: Path, out_dir: Path, num_classes: int, device):
     with open(emb_dir / "config.json") as f:
         emb_config = json.load(f)
-    vision_dim = emb_config.get("vision_dim", 3584)
-    audio_dim = emb_config.get("audio_dim", 768)
+    default_dims = get_modality_dims(emb_config.get("vision_encoder", "clip"))
+    vision_dim = emb_config.get("vision_dim", default_dims["vision_camera1"])
+    audio_dim = emb_config.get("audio_dim", default_dims["audio"])
+    text_dim = emb_config.get("text_dim", default_dims["text"])
     dataset_num_classes = emb_config.get("num_classes", num_classes)
 
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
@@ -126,14 +138,15 @@ def run_evaluation(emb_dir: Path, ckpt_path: Path, out_dir: Path, num_classes: i
     test_ds = Subset(ds, test_idx)
     test_dl = DataLoader(test_ds, batch_size=32, shuffle=False, collate_fn=collate_fn)
 
-    pressure = PressureSensorEncoder(output_dim=256, input_features=2).to(device)
-    emg = EMGSensorEncoder(output_dim=256, num_channels=3, input_features=4).to(device)
+    pressure = PressureSensorEncoder(output_dim=PRESSURE_DIM, input_features=2).to(device)
+    emg = EMGSensorEncoder(output_dim=EMG_DIM, num_channels=3, input_features=4).to(device)
     modality_dims = {
         "vision_camera1": vision_dim,
         "vision_camera2": vision_dim,
         "audio": audio_dim,
-        "pressure": 256,
-        "emg": 256,
+        "text": text_dim,
+        "pressure": PRESSURE_DIM,
+        "emg": EMG_DIM,
     }
     fusion = MultimodalFusionWithAttention(
         modality_dims=modality_dims,
@@ -151,7 +164,7 @@ def run_evaluation(emb_dir: Path, ckpt_path: Path, out_dir: Path, num_classes: i
     model.eval()
     y_true, y_pred = [], []
     movement_outputs = []
-    has_movement = "movement_state" in ckpt
+    has_movement = "movement_state" in ckpt and ckpt["movement_state"] is not None
     if has_movement:
         movement_head = MovementHead(embedding_dim=fusion_dim).to(device)
         movement_head.load_state_dict(ckpt["movement_state"])
@@ -232,8 +245,10 @@ def run_evaluation_linear_probe(emb_dir: Path, ckpt_path: Path, out_dir: Path, n
     """Train a linear classifier on fused embeddings. Measures representation transfer (can approach VisCoP)."""
     with open(emb_dir / "config.json") as f:
         emb_config = json.load(f)
-    vision_dim = emb_config.get("vision_dim", 3584)
-    audio_dim = emb_config.get("audio_dim", 768)
+    default_dims = get_modality_dims(emb_config.get("vision_encoder", "clip"))
+    vision_dim = emb_config.get("vision_dim", default_dims["vision_camera1"])
+    audio_dim = emb_config.get("audio_dim", default_dims["audio"])
+    text_dim = emb_config.get("text_dim", default_dims["text"])
     dataset_num_classes = emb_config.get("num_classes", num_classes)
 
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
@@ -248,14 +263,15 @@ def run_evaluation_linear_probe(emb_dir: Path, ckpt_path: Path, out_dir: Path, n
     except ValueError:
         train_idx, test_idx = train_test_split(range(len(ds)), test_size=0.2, random_state=42)
 
-    pressure = PressureSensorEncoder(output_dim=256, input_features=2).to(device)
-    emg = EMGSensorEncoder(output_dim=256, num_channels=3, input_features=4).to(device)
+    pressure = PressureSensorEncoder(output_dim=PRESSURE_DIM, input_features=2).to(device)
+    emg = EMGSensorEncoder(output_dim=EMG_DIM, num_channels=3, input_features=4).to(device)
     modality_dims = {
         "vision_camera1": vision_dim,
         "vision_camera2": vision_dim,
         "audio": audio_dim,
-        "pressure": 256,
-        "emg": 256,
+        "text": text_dim,
+        "pressure": PRESSURE_DIM,
+        "emg": EMG_DIM,
     }
     fusion = MultimodalFusionWithAttention(
         modality_dims=modality_dims,
@@ -292,10 +308,16 @@ def run_evaluation_linear_probe(emb_dir: Path, ckpt_path: Path, out_dir: Path, n
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
 
-    clf = LogisticRegression(max_iter=1000, random_state=42, C=1.0)
-    clf.fit(X_train_s, y_train)
-    y_pred = clf.predict(X_test_s)
-    accuracy = float(np.mean(y_test == y_pred))
+    n_classes_train = len(np.unique(y_train))
+    if n_classes_train < 2:
+        print(f"Warning: training set has only one class (class {int(y_train[0])}). Linear probe skipped; reporting accuracy 0.")
+        y_pred = np.zeros_like(y_test)
+        accuracy = 0.0
+    else:
+        clf = LogisticRegression(max_iter=1000, random_state=42, C=1.0)
+        clf.fit(X_train_s, y_train)
+        y_pred = clf.predict(X_test_s)
+        accuracy = float(np.mean(y_test == y_pred))
 
     per_class = {}
     if dataset_num_classes is not None and dataset_num_classes <= 20:
@@ -340,9 +362,9 @@ def main():
     p.add_argument("--embeddings-dir", default=None, help="Override embeddings path")
     p.add_argument("--out-dir", default=None, help="Override output path")
     p.add_argument("--linear-probe", action="store_true",
-                   help="Train linear classifier on fused embeddings (for cross-dataset transfer; default for video_mme/nextqa/charades/egoschema)")
+                   help="Train linear classifier on frozen embeddings (for transfer eval without finetuning)")
     p.add_argument("--zero-shot", action="store_true",
-                   help="Use SData-trained classifier (only meaningful for SData)")
+                   help="Use checkpoint classification head (default; no effect if not using --linear-probe)")
     args = p.parse_args()
 
     config_path = Path(__file__).resolve().parent / "config" / "datasets.yaml"
@@ -366,10 +388,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_classes = cfg.get("num_classes") or 8
 
-    # SData: zero-shot (trained head). Cross-dataset: linear-probe by default (measures transfer).
-    use_linear_probe = args.linear_probe or (
-        not args.zero_shot and args.dataset in ("video_mme", "nextqa", "charades", "egoschema", "vima_bench")
-    )
+    # Default: use checkpoint's head (zero-shot). Pass --linear-probe to train a linear classifier on embeddings (transfer eval).
+    use_linear_probe = args.linear_probe
     if use_linear_probe:
         print(f"Using linear-probe evaluation (train classifier on fused embeddings for {args.dataset})")
         results = run_evaluation_linear_probe(emb_dir, Path(args.checkpoint), out_dir, num_classes, device)

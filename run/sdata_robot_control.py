@@ -122,6 +122,7 @@ class SDataRobotController:
             'vision_camera1': vision_dim,
             'vision_camera2': vision_dim,
             'audio': 768,
+            'text': 768,
             'pressure': 256,
             'emg': 256,
         }
@@ -247,10 +248,14 @@ class SDataRobotController:
 
             p_emb, e_emb = self._encode_sensors()
 
+            # No direct text input in real-time SData; pass zeros for text modality
+            text_emb = torch.zeros(1, 768, device=self.device)
+
             embeddings = {
                 'vision_camera1': v_emb1,
                 'vision_camera2': v_emb2,
                 'audio': a_emb,
+                'text': text_emb,
                 'pressure': p_emb,
                 'emg': e_emb,
             }

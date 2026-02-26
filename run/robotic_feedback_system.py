@@ -189,16 +189,17 @@ class RoboticFeedbackSystem(nn.Module):
         embeddings['audio'] = audio_embedding
 
         # ===== Process Text (from audio-to-text conversion) =====
-        # Plug: Insert your audio-to-text conversion here
-        # If command_texts is None, you can call your ASR pipeline here
-        # Example:
-        #   command_texts = my_asr_pipeline(audio)
-        # For now, expects command_texts as a list of strings (batch)
-        if command_texts is None:
-            # Placeholder: pass empty string for each sample
-            command_texts = ["Move Left"] * audio.shape[0]
-        with torch.no_grad():
-            text_embedding = self.text_encoder(command_texts)
+        # When no command text: pass-through with zero embedding so fusion still receives text dim.
+        batch_size = audio.shape[0]
+        text_dim = self.text_encoder.output_dim
+        if command_texts is None or (isinstance(command_texts, (list, tuple)) and len(command_texts) == 0):
+            text_embedding = torch.zeros(batch_size, text_dim, device=audio.device)
+        else:
+            # Allow single string -> treat as one sample
+            if isinstance(command_texts, str):
+                command_texts = [command_texts] * batch_size
+            with torch.no_grad():
+                text_embedding = self.text_encoder(command_texts)
         embeddings['text'] = text_embedding
         
         # ===== Process Pressure Sensor =====

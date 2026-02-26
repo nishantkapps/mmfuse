@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 import logging
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -136,6 +137,8 @@ def main():
     p.add_argument('--cross-pair', action='store_true')
     p.add_argument('--augment-variations', type=int, default=16)
     p.add_argument('--batch-size', type=int, default=24, help='Batch size for encoding')
+    p.add_argument('--force', action='store_true', help='Overwrite existing embeddings (default: skip if out-dir has config.json and .pt files)')
+    p.add_argument('--no-backup', action='store_true', help='With --force: do not backup existing dir before overwriting (default: backup to <out-dir>_backup_<timestamp>)')
     p.add_argument('--device', default='cuda:auto' if torch.cuda.is_available() else 'cpu',
                    help='Device: cuda:auto (pick freest GPU), cuda:0..3, cuda, auto (multi-GPU), cpu')
     args = p.parse_args()
@@ -185,13 +188,28 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if (out_dir / 'config.json').exists() and any(out_dir.glob('*.pt')):
-        log.info("Embeddings already exist in %s. Skipping precompute.", out_dir)
-        return 0
+        if not args.force:
+            log.info("Embeddings already exist in %s. Skipping precompute. Use --force to overwrite.", out_dir)
+            return 0
+        if not getattr(args, 'no_backup', False):
+            timestamp = time.strftime('%Y%m%d_%H%M%S')
+            backup_dir = out_dir.parent / f"{out_dir.name}_backup_{timestamp}"
+            log.info("Backing up existing embeddings to %s ...", backup_dir)
+            shutil.copytree(out_dir, backup_dir)
+            log.info("Backup done.")
+        for f in out_dir.glob('*.pt'):
+            f.unlink()
+        (out_dir / 'config.json').unlink(missing_ok=True)
+        log.info("Cleared existing embeddings in %s (--force).", out_dir)
 
-    samples = build_sample_list(root, args.cross_pair, args.augment_variations)
+    # Split before augmentation: by unique (cam1, cam2) pairs, then expand with cross-pair and augmentation
+    train_samples, test_samples = build_sample_list(root, args.cross_pair, args.augment_variations, split_before_aug=True)
+    samples = train_samples + test_samples
+    train_count = len(train_samples)
+    test_count = len(test_samples)
     if not samples:
         raise RuntimeError(f"No samples in {args.dataset}")
-    log.info("Samples: %d", len(samples))
+    log.info("Split before augmentation: train=%d test=%d (total=%d)", train_count, test_count, len(samples))
     vprep = VisionPreprocessor(image_size=(224, 224), normalize=True)
     aprep = AudioPreprocessor(sample_rate=16000, duration=2.5)
     target_audio_samples = int(aprep.duration * aprep.sample_rate)
@@ -229,6 +247,8 @@ def main():
         'augment_variations': args.augment_variations,
         'num_samples': len(samples),
         'num_classes': num_classes,
+        'train_count': train_count,
+        'test_count': test_count,
     }
     with open(out_dir / 'config.json', 'w') as f:
         json.dump(config, f, indent=2)

@@ -53,12 +53,14 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Build config.json (HuggingFace-style)
+    from config_modality import FUSION_DIM, get_modality_dims, AUDIO_DIM
+    default_dims = get_modality_dims(ckpt.get('vision_encoder', 'viscop'))
     config = {
         "model_type": "mmfuse_sdata",
         "num_classes": ckpt.get('num_classes', 8),
-        "fusion_dim": ckpt.get('fusion_dim', 256),
-        "vision_dim": ckpt.get('vision_dim', 3584),
-        "audio_dim": 768,
+        "fusion_dim": ckpt.get('fusion_dim', FUSION_DIM),
+        "vision_dim": ckpt.get('vision_dim', default_dims['vision_camera1']),
+        "audio_dim": ckpt.get('audio_dim', AUDIO_DIM),
         "vision_encoder": ckpt.get('vision_encoder', 'viscop'),
         "audio_encoder": ckpt.get('audio_encoder', 'wav2vec'),
         "has_movement_head": 'movement_state' in ckpt,
@@ -89,6 +91,8 @@ from pathlib import Path
 # Add mmfuse project root (parent of models/)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from config_modality import get_modality_dims, PRESSURE_DIM, EMG_DIM, TEXT_DIM
 
 import torch
 
@@ -129,11 +133,13 @@ def main():
 
     fusion_dim = config["fusion_dim"]
     num_classes = config["num_classes"]
-    vision_dim = config["vision_dim"]
-
+    modality_dims = get_modality_dims(config.get("vision_encoder", "clip"))
+    modality_dims = {**modality_dims, "vision_camera1": config.get("vision_dim", modality_dims["vision_camera1"]), "vision_camera2": config.get("vision_dim", modality_dims["vision_camera2"]), "audio": config.get("audio_dim", modality_dims["audio"])}
     fusion = MultimodalFusionWithAttention(
-        vision_dim=vision_dim, audio_dim=768, pressure_dim=256, emg_dim=256,
-        output_dim=fusion_dim, num_heads=8, dropout=0.2
+        modality_dims=modality_dims,
+        fusion_dim=fusion_dim,
+        num_heads=8,
+        dropout=0.2,
     )
     classifier = ActionClassifier(fusion_dim, num_classes)
     movement_head = MovementHead(fusion_dim) if config.get("has_movement_head") else None
@@ -154,8 +160,8 @@ def main():
         print("No .pt files in", args.embeddings_dir)
         sys.exit(1)
 
-    pressure_enc = PressureSensorEncoder(output_dim=256, input_features=2)
-    emg_enc = EMGSensorEncoder(output_dim=256, num_channels=3, input_features=4)
+    pressure_enc = PressureSensorEncoder(output_dim=PRESSURE_DIM, input_features=2)
+    emg_enc = EMGSensorEncoder(output_dim=EMG_DIM, num_channels=3, input_features=4)
 
     correct = 0
     for pth in samples:
@@ -163,15 +169,17 @@ def main():
         v1 = d["vision_camera1"].unsqueeze(0).float()
         v2 = d["vision_camera2"].unsqueeze(0).float()
         a = d["audio"].unsqueeze(0).float()
+        txt = d.get("text", torch.zeros(TEXT_DIM)).unsqueeze(0).float()
         t = d["target"].item()
         v1[~torch.isfinite(v1)] = 0.0
         v2[~torch.isfinite(v2)] = 0.0
         a[~torch.isfinite(a)] = 0.0
+        txt[~torch.isfinite(txt)] = 0.0
         p_emb = pressure_enc(torch.zeros(1, 2))
         e_emb = emg_enc(torch.zeros(1, 4))
-        emb = {"vision_camera1": v1, "vision_camera2": v2, "audio": a, "pressure": p_emb, "emg": e_emb}
+        emb = {"vision_camera1": v1, "vision_camera2": v2, "audio": a, "text": txt, "pressure": p_emb, "emg": e_emb}
         with torch.no_grad():
-            fused = fusion(emb)
+            fused, _ = fusion(emb, return_kl=True)
             logits = classifier(fused)
             pred = logits.argmax(dim=1).item()
             mov = movement_head(fused).squeeze().tolist() if movement_head else []

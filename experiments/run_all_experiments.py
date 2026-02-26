@@ -18,38 +18,17 @@ from pathlib import Path
 import yaml
 
 
-def find_checkpoint():
-    """Find latest checkpoint from model training (excludes ablation_runs)."""
-    proj = Path(__file__).resolve().parent.parent
-    # 1. checkpoints/ from training/train_sdata_attention.py
-    candidates = sorted(proj.glob("checkpoints/ckpt_sdata_epoch_*.pt"))
-    if candidates:
-        return str(candidates[-1])
-    # 2. runs/ subdirs
-    candidates = sorted(proj.glob("runs/*/ckpt_sdata_epoch_*.pt"))
-    if candidates:
-        return str(candidates[-1])
-    # 3. Exported model
-    if (proj / "models/sdata_viscop/pytorch_model.bin").exists():
-        return str(proj / "models/sdata_viscop/pytorch_model.bin")
-    return None
-
-
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--checkpoint", default=None, help="Path to model checkpoint (.pt); auto-picks latest from training if omitted")
+    proj = Path(__file__).resolve().parent.parent
+    p.add_argument("--checkpoint", default=str(proj / "checkpoints/model.pt"), help="Path to model file (default: checkpoints/model.pt)")
     p.add_argument("--datasets", nargs="+", default=None,
                    help="Specific datasets to run (default: all)")
     p.add_argument("--skip-missing", action="store_true", default=True,
                    help="Skip datasets without embeddings (default: True)")
     args = p.parse_args()
 
-    checkpoint = args.checkpoint or find_checkpoint()
-    if not checkpoint or not Path(checkpoint).exists():
-        print("No model training checkpoint found.")
-        print("  Train first: python training/train_sdata_attention.py --use-precomputed --embeddings-dir embeddings/sdata_viscop")
-        print("  Or pass: python experiments/run_all_experiments.py --checkpoint path/to/ckpt_sdata_epoch_N.pt")
-        return 1
+    checkpoint = args.checkpoint
 
     script_dir = Path(__file__).resolve().parent
     config_path = script_dir / "config" / "datasets.yaml"

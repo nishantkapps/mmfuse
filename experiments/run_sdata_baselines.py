@@ -31,6 +31,8 @@ from sklearn.preprocessing import StandardScaler
 _proj_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_proj_root))
 
+from config_modality import get_modality_dims, PRESSURE_DIM, EMG_DIM, TEXT_DIM
+
 try:
     from mmfuse.encoders.sensor_encoder import PressureSensorEncoder, EMGSensorEncoder
     from mmfuse.fusion.multimodal_fusion import MultimodalFusionWithAttention
@@ -46,11 +48,14 @@ def load_embeddings(emb_dir: Path):
     samples = sorted(emb_dir.glob("*.pt"))
     if not samples:
         raise RuntimeError(f"No .pt files in {emb_dir}")
+    n = len(samples)
     v1_list, v2_list, a_list, targets = [], [], [], []
     def to_np(t):
         return t.detach().numpy() if hasattr(t, "detach") else (t if isinstance(t, np.ndarray) else np.array(t))
 
-    for p in samples:
+    for i, p in enumerate(samples):
+        if (i + 1) % 500 == 0 or i == 0 or i == n - 1:
+            print(f"  Loading {i + 1}/{n} ...", flush=True)
         d = torch.load(p, map_location="cpu", weights_only=True)
         v1_list.append(to_np(d["vision_camera1"]))
         v2_list.append(to_np(d["vision_camera2"]))
@@ -98,8 +103,9 @@ def run_mmfuse_eval(emb_dir: Path, ckpt_path: Path, train_idx, test_idx, device)
 
     with open(emb_dir / "config.json") as f:
         emb_config = json.load(f)
-    vision_dim = emb_config.get("vision_dim", 3584)
-    audio_dim = emb_config.get("audio_dim", 768)
+    default_dims = get_modality_dims(emb_config.get("vision_encoder", "clip"))
+    vision_dim = emb_config.get("vision_dim", default_dims["vision_camera1"])
+    audio_dim = emb_config.get("audio_dim", default_dims["audio"])
 
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
     fusion_dim = ckpt["fusion_dim"]
@@ -109,14 +115,15 @@ def run_mmfuse_eval(emb_dir: Path, ckpt_path: Path, train_idx, test_idx, device)
     test_ds = Subset(ds, test_idx)
     test_dl = DataLoader(test_ds, batch_size=32, shuffle=False, collate_fn=collate_fn)
 
-    pressure = PressureSensorEncoder(output_dim=256, input_features=2).to(device)
-    emg = EMGSensorEncoder(output_dim=256, num_channels=3, input_features=4).to(device)
+    pressure = PressureSensorEncoder(output_dim=PRESSURE_DIM, input_features=2).to(device)
+    emg = EMGSensorEncoder(output_dim=EMG_DIM, num_channels=3, input_features=4).to(device)
     modality_dims = {
         "vision_camera1": vision_dim,
         "vision_camera2": vision_dim,
         "audio": audio_dim,
-        "pressure": 256,
-        "emg": 256,
+        "text": TEXT_DIM,
+        "pressure": PRESSURE_DIM,
+        "emg": EMG_DIM,
     }
     fusion = MultimodalFusionWithAttention(
         modality_dims=modality_dims,
@@ -136,7 +143,7 @@ def run_mmfuse_eval(emb_dir: Path, ckpt_path: Path, train_idx, test_idx, device)
 
     y_true, y_pred = [], []
     movement_out = []
-    has_movement = "movement_state" in ckpt
+    has_movement = "movement_state" in ckpt and ckpt["movement_state"] is not None
     if has_movement:
         from experiments.run_dataset import MovementHead
 
@@ -180,36 +187,22 @@ def run_mmfuse_eval(emb_dir: Path, ckpt_path: Path, train_idx, test_idx, device)
     return {"accuracy": acc, "precision": prec, "recall": rec, "f1": f1, "movement_mse": movement_mse}
 
 
-def find_checkpoint():
-    proj = Path(__file__).resolve().parent.parent
-    for pattern in ["checkpoints/ckpt_sdata_epoch_*.pt", "runs/*/ckpt_sdata_epoch_*.pt"]:
-        c = sorted(proj.glob(pattern))
-        if c:
-            return str(c[-1])
-    if (proj / "models/sdata_viscop/pytorch_model.bin").exists():
-        return str(proj / "models/sdata_viscop/pytorch_model.bin")
-    return None
-
-
 def main():
     p = argparse.ArgumentParser()
+    proj = Path(__file__).resolve().parent.parent
     p.add_argument("--embeddings-dir", default=None, help="embeddings/sdata_viscop")
-    p.add_argument("--checkpoint", default=None, help="MMFuse checkpoint")
+    p.add_argument("--checkpoint", default=str(proj / "checkpoints/model.pt"), help="MMFuse model file (default: checkpoints/model.pt)")
     p.add_argument("--out-dir", default=None, help="Output dir")
     args = p.parse_args()
 
-    proj = Path(__file__).resolve().parent.parent
     emb_dir = Path(args.embeddings_dir) if args.embeddings_dir else proj / "embeddings" / "sdata_viscop"
-    ckpt_path = args.checkpoint or find_checkpoint()
+    ckpt_path = args.checkpoint
     out_dir = Path(args.out_dir) if args.out_dir else proj / "experiments" / "results"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if not emb_dir.exists():
         print(f"Embeddings not found: {emb_dir}")
         print("Run: python scripts/precompute_sdata_embeddings.py --dataset dataset/sdata --out-dir embeddings/sdata_viscop")
-        return 1
-    if not ckpt_path or not Path(ckpt_path).exists():
-        print("No checkpoint found. Use --checkpoint path/to/ckpt_sdata_epoch_N.pt")
         return 1
 
     print("Loading SData embeddings...")

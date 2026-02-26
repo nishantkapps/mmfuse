@@ -159,6 +159,7 @@ def main():
         "vision_camera1": vision_dim,
         "vision_camera2": vision_dim,
         "audio": audio_dim,
+        "text": 768,
         "pressure": 256,
         "emg": 256,
     }
@@ -200,11 +201,13 @@ def main():
         v1 = data["vision_camera1"].unsqueeze(0).float().to(device)
         v2 = data["vision_camera2"].unsqueeze(0).float().to(device)
         audio = data["audio"].unsqueeze(0).float().to(device)
+        text_emb = data.get("text", torch.zeros(768)).unsqueeze(0).float().to(device)
         target = int(data["target"].item() if torch.is_tensor(data["target"]) else data["target"])
 
         v1[~torch.isfinite(v1)] = 0.0
         v2[~torch.isfinite(v2)] = 0.0
         audio[~torch.isfinite(audio)] = 0.0
+        text_emb[~torch.isfinite(text_emb)] = 0.0
 
         p_emb = pressure_enc(torch.zeros(1, 2, device=device))
         e_emb = emg_enc(torch.zeros(1, 4, device=device))
@@ -213,6 +216,7 @@ def main():
             "vision_camera1": v1,
             "vision_camera2": v2,
             "audio": audio,
+            "text": text_emb,
             "pressure": p_emb,
             "emg": e_emb,
         }

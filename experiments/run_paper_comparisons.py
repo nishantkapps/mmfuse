@@ -163,17 +163,6 @@ def run_sdata_comparison(emb_viscop: Path, emb_clip: Path, ckpt_path: Path | Non
     return out
 
 
-def find_checkpoint(proj: Path) -> Path | None:
-    """Find latest MMFuse checkpoint."""
-    for pattern in ["checkpoints/ckpt_sdata_epoch_*.pt", "runs/*/ckpt_sdata_epoch_*.pt"]:
-        candidates = sorted(proj.glob(pattern))
-        if candidates:
-            return candidates[-1]
-    if (proj / "models/sdata_viscop/pytorch_model.bin").exists():
-        return proj / "models/sdata_viscop/pytorch_model.bin"
-    return None
-
-
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", default=None, help="MMFuse checkpoint for SData (auto-find if missing)")
@@ -189,21 +178,10 @@ def main():
     out_dir = results_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Resolve checkpoint: use given path or auto-find
-    ckpt_path = None
-    if args.checkpoint and "N.pt" not in str(args.checkpoint):
-        p0 = Path(args.checkpoint)
-        if p0.is_absolute():
-            ckpt_path = p0 if p0.exists() else None
-        else:
-            for base in [Path.cwd(), proj]:
-                cand = (base / args.checkpoint).resolve()
-                if cand.exists():
-                    ckpt_path = cand
-                    break
-    if ckpt_path is None:
-        ckpt_path = find_checkpoint(proj)
-    args.checkpoint = str(ckpt_path) if ckpt_path else None
+    # Model file: use given path or checkpoints/model.pt
+    ckpt_path = Path(args.checkpoint) if args.checkpoint else (proj / "checkpoints/model.pt")
+    ckpt_path = (proj / ckpt_path).resolve() if not ckpt_path.is_absolute() else ckpt_path.resolve()
+    args.checkpoint = str(ckpt_path)
 
     # Resolve device for MMFuse SData eval
     import torch

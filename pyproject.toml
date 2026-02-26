@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mmfuse"
+version = "0.1.0"
+description = "Multimodal fusion with VisCoP/CLIP encoders"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "torch",
+    "numpy",
+    "opencv-python",
+    "PyYAML",
+    "librosa",
+    "soundfile",
+    "transformers",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+# Expose repo root as package "mmfuse" so "from mmfuse.encoders" works
+[tool.setuptools.package-dir]
+mmfuse = "."
+
+[tool.setuptools]
+packages = ["mmfuse", "mmfuse.encoders", "mmfuse.fusion", "mmfuse.preprocessing", "mmfuse.hardware_io"]

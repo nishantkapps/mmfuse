@@ -82,10 +82,12 @@ class PrecomputedSDataDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         data = torch.load(self.samples[idx], map_location="cpu", weights_only=True)
+        text_emb = data.get("text", torch.zeros(768))
         return {
             "vision_camera1": data["vision_camera1"],
             "vision_camera2": data["vision_camera2"],
             "audio": data["audio"],
+            "text": text_emb,
             "target": data["target"],
         }
 
@@ -113,7 +115,8 @@ def build_embedding_ablation(batch, device, encoders, ablation_cfg):
     v1 = torch.stack([s["vision_camera1"] for s in batch]).to(device).float()
     v2 = torch.stack([s["vision_camera2"] for s in batch]).to(device).float()
     a = torch.stack([s["audio"] for s in batch]).to(device).float()
-    for t in (v1, v2, a):
+    txt = torch.stack([s["text"] for s in batch]).to(device).float()
+    for t in (v1, v2, a, txt):
         t[~torch.isfinite(t)] = 0.0
 
     if not ablation_cfg.get("use_vision_cam1", True):
@@ -122,6 +125,8 @@ def build_embedding_ablation(batch, device, encoders, ablation_cfg):
         v2 = torch.zeros_like(v2)
     if not ablation_cfg.get("use_audio", True):
         a = torch.zeros_like(a)
+    if not ablation_cfg.get("use_text", True):
+        txt = torch.zeros_like(txt)
 
     pressures = torch.zeros(len(batch), 2, device=device)
     emgs = torch.zeros(len(batch), 4, device=device)
@@ -137,6 +142,7 @@ def build_embedding_ablation(batch, device, encoders, ablation_cfg):
         "vision_camera1": v1,
         "vision_camera2": v2,
         "audio": a,
+        "text": txt,
         "pressure": p_emb,
         "emg": e_emb,
     }
@@ -283,6 +289,7 @@ def train_ablation(args, ablation_cfg: dict):
         "vision_camera1": vision_dim,
         "vision_camera2": vision_dim,
         "audio": audio_dim,
+        "text": 768,
         "pressure": 256,
         "emg": 256,
     }
@@ -478,6 +485,7 @@ def run_evaluation(args, ablation_cfg: dict) -> dict:
         "vision_camera1": vision_dim,
         "vision_camera2": vision_dim,
         "audio": audio_dim,
+        "text": 768,
         "pressure": 256,
         "emg": 256,
     }
