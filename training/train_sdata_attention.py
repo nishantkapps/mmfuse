@@ -411,16 +411,21 @@ def train(args):
     if use_precomputed:
         train_count = emb_config.get('train_count')
         test_count = emb_config.get('test_count')
-        if train_count is not None and test_count is not None and train_count + test_count == len(ds.samples):
+        n_samples = len(ds.samples)
+        if train_count is not None and test_count is not None and train_count + test_count == n_samples:
             train_idx = list(range(0, train_count))
             test_idx = list(range(train_count, train_count + test_count))
             log.info("Precomputed: using split-before-augmentation (train=%d test=%d)", train_count, test_count)
         else:
+            if train_count is not None or test_count is not None:
+                log.warning("Precomputed: config train_count=%s test_count=%s but len(samples)=%d (mismatch). Using 90/10 split. Re-run precompute to get split-before-aug.",
+                            train_count, test_count, n_samples)
+            else:
+                log.warning("Precomputed: no train_count/test_count in config; using 90/10 split. Re-run precompute with current script for split-before-aug.")
             labels = [torch.load(p, weights_only=True)['target'] for p in ds.samples]
             train_idx, test_idx = train_test_split(
                 range(len(ds)), test_size=0.1, stratify=labels, random_state=42
             )
-            log.warning("Precomputed: no train_count/test_count in config; split by label (re-run precompute for split-before-aug)")
     else:
         # Split by base (cam1, cam2) first; train gets all augmentations, test gets v=0 only
         pair_to_label = {}

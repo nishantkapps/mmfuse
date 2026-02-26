@@ -42,9 +42,10 @@ class MultimodalFusion(nn.Module):
         self.projections = nn.ModuleDict()
         for modality, input_dim in modality_dims.items():
             self.projections[modality] = nn.Sequential(
+                nn.LayerNorm(input_dim),
                 nn.Linear(input_dim, fusion_dim),
                 nn.BatchNorm1d(fusion_dim),
-                nn.ReLU(),
+                nn.GELU(),
                 nn.Dropout(dropout)
             )
         
@@ -184,9 +185,10 @@ class MultimodalFusionWithAttention(nn.Module):
         self.projections = nn.ModuleDict()
         for modality, input_dim in modality_dims.items():
             self.projections[modality] = nn.Sequential(
+                nn.LayerNorm(input_dim),
                 nn.Linear(input_dim, fusion_dim),
                 nn.BatchNorm1d(fusion_dim),
-                nn.ReLU()
+                nn.GELU()
             )
         
         # Cross-modal attention
@@ -197,66 +199,105 @@ class MultimodalFusionWithAttention(nn.Module):
             batch_first=True
         )
         
-        # Final fusion: concat(attended) -> MLP. Use smaller hidden to reduce params.
-        # fusion_dim * num_modalities can be large; hidden = fusion_dim keeps params low
-        concat_dim = fusion_dim * len(modality_dims)
+        # Final fusion: gated fusion over three core modalities (vision1, vision2, audio).
+        # Gate network takes concat([h1, h2, h3]) and outputs 3 scalars.
+        self.gate_net = nn.Linear(fusion_dim * 3, 3)
         self.fusion_mlp = nn.Sequential(
-            nn.Linear(concat_dim, fusion_dim),
-            nn.ReLU(),
+            nn.LayerNorm(fusion_dim),
+            nn.Linear(fusion_dim, fusion_dim),
+            nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(fusion_dim, fusion_dim)
+            nn.Linear(fusion_dim, fusion_dim),
+            nn.LayerNorm(fusion_dim),
         )
     
     def forward(self, embeddings: Dict[str, torch.Tensor], return_kl: bool = True) -> Tuple[torch.Tensor, dict]:
         """
-        Fuse with cross-modal attention and compute KL divergence for knowledge distillation.
-        
-        Args:
-            embeddings: Dictionary of embeddings from each modality
-            return_kl: Whether to return KL divergence values (default True)
-        
-        Returns:
-            Tuple of (fused embedding, dict of KL divergences)
+        Fuse with cross-modal attention and compute alignment losses.
+        Pipeline:
+          encoders -> projections -> cross-modal attention -> KL divergence (post-attn) ->
+          3-way contrastive alignment (vision1, vision2, audio) -> concat/MLP -> fused.
         """
-        # Project embeddings
+        # Project embeddings from each encoder into common fusion_dim space
         projected = {}
         for modality, embedding in embeddings.items():
             projected[modality] = self.projections[modality](embedding)
-        
-        # --- Knowledge Distillation (KL Divergence) ---
-        # Use temperature to soften distributions and avoid NaN from extreme log_softmax
-        kl_temp = 2.0
-        kl_losses = {}
-        # Camera modalities: look for keys containing 'camera' or 'vision'
-        camera_keys = [k for k in projected if 'camera' in k or 'vision' in k]
-        if len(camera_keys) == 2:
-            cam1, cam2 = camera_keys
-            p1 = torch.log_softmax(projected[cam1] / kl_temp, dim=-1)
-            p2 = torch.softmax(projected[cam2] / kl_temp, dim=-1).clamp(min=1e-8)
-            kl_cam = torch.nn.functional.kl_div(p1, p2, reduction='batchmean')
-            kl_losses['kl_camera'] = kl_cam
-        # Text/Audio modalities
-        text_keys = [k for k in projected if 'text' in k]
-        audio_keys = [k for k in projected if 'audio' in k]
-        if text_keys and audio_keys:
-            text_key = text_keys[0]
-            audio_key = audio_keys[0]
-            p1 = torch.log_softmax(projected[text_key] / kl_temp, dim=-1)
-            p2 = torch.softmax(projected[audio_key] / kl_temp, dim=-1).clamp(min=1e-8)
-            kl_text_audio = torch.nn.functional.kl_div(p1, p2, reduction='batchmean')
-            kl_losses['kl_text_audio'] = kl_text_audio
-        
-        # --- N-way cross alignment (cross-modal attention) ---
-        modality_names = sorted(projected.keys())
-        stacked = torch.stack(
-            [projected[name] for name in modality_names],
-            dim=1
-        )  # (batch_size, num_modalities, fusion_dim)
+
+        # --- Cross-modal attention over core modalities ---
+        # Focus attention on the three primary modalities we care about: two vision streams + audio.
+        core_modalities = [k for k in projected if ('camera' in k or 'vision' in k or 'audio' in k)]
+        modality_names = sorted(core_modalities) if core_modalities else sorted(projected.keys())
+        # (batch_size, num_modalities, fusion_dim)
+        stacked = torch.stack([projected[name] for name in modality_names], dim=1)
         attended, _ = self.attention(stacked, stacked, stacked)
-        batch_size = attended.size(0)
-        flattened = attended.reshape(batch_size, -1)
-        fused = self.fusion_mlp(flattened)
+
+        # Prepare per-modality attended embeddings for alignment losses
+        name_to_index = {name: i for i, name in enumerate(modality_names)}
+        kl_losses: dict = {}
+        kl_temp = 2.0
+
+        def _kl(p_src: torch.Tensor, p_tgt: torch.Tensor) -> torch.Tensor:
+            q1 = torch.log_softmax(p_src / kl_temp, dim=-1)
+            q2 = torch.softmax(p_tgt / kl_temp, dim=-1).clamp(min=1e-8)
+            return torch.nn.functional.kl_div(q1, q2, reduction="batchmean")
+
+        # Identify main modalities: two cameras + optional audio
+        v1_key = next((k for k in modality_names if "camera1" in k or "vision_camera1" in k), None)
+        v2_key = next((k for k in modality_names if "camera2" in k or "vision_camera2" in k), None)
+        a_key = next((k for k in modality_names if "audio" in k), None)
+
+        if v1_key is not None and v2_key is not None:
+            v1_att = attended[:, name_to_index[v1_key], :]
+            v2_att = attended[:, name_to_index[v2_key], :]
+            # KL divergence between the two vision streams (post-attention)
+            kl_cam = _kl(v1_att, v2_att)
+            kl_losses["kl_camera"] = kl_cam
+
+        # Optional text/audio KL if both present after attention
+        t_key = next((k for k in modality_names if "text" in k), None)
+        if t_key is not None and a_key is not None:
+            t_att = attended[:, name_to_index[t_key], :]
+            a_att = attended[:, name_to_index[a_key], :]
+            kl_text_audio = _kl(t_att, a_att)
+            kl_losses["kl_text_audio"] = kl_text_audio
+
+        # --- 3-way contrastive alignment (vision1, vision2, audio) ---
+        # Use attended embeddings as modality-specific representations for contrastive learning.
+        if v1_key is not None and v2_key is not None and a_key is not None:
+            v1 = attended[:, name_to_index[v1_key], :]  # (B, D)
+            v2 = attended[:, name_to_index[v2_key], :]
+            a = attended[:, name_to_index[a_key], :]
+
+            def _contrastive(z1: torch.Tensor, z2: torch.Tensor, temp: float = 0.1) -> torch.Tensor:
+                """Symmetric InfoNCE between two modality views."""
+                z1n = torch.nn.functional.normalize(z1, dim=-1)
+                z2n = torch.nn.functional.normalize(z2, dim=-1)
+                logits = (z1n @ z2n.t()) / temp  # (B, B)
+                labels = torch.arange(z1.size(0), device=z1.device)
+                loss_i = torch.nn.functional.cross_entropy(logits, labels)
+                loss_j = torch.nn.functional.cross_entropy(logits.t(), labels)
+                return 0.5 * (loss_i + loss_j)
+
+            c_v1_v2 = _contrastive(v1, v2)
+            c_v1_a = _contrastive(v1, a)
+            c_v2_a = _contrastive(v2, a)
+            kl_losses["contrastive_3way"] = (c_v1_v2 + c_v1_a + c_v2_a) / 3.0
+
+        # --- Final fusion: gated fusion over (h1, h2, h3) = (vision1, vision2, audio) ---
+        # Default fallback: average over attended modalities (if some core modality is missing).
+        fused_vec = attended.mean(dim=1)
+        if v1_key is not None and v2_key is not None and a_key is not None:
+            h1 = attended[:, name_to_index[v1_key], :]  # (B, D)
+            h2 = attended[:, name_to_index[v2_key], :]  # (B, D)
+            h3 = attended[:, name_to_index[a_key], :]   # (B, D)
+            concat_h = torch.cat([h1, h2, h3], dim=-1)  # (B, 3D)
+            gates = torch.sigmoid(self.gate_net(concat_h))  # (B, 3)
+            fused_vec = (
+                gates[:, 0:1] * h1 +
+                gates[:, 1:2] * h2 +
+                gates[:, 2:3] * h3
+            )
+        fused = self.fusion_mlp(fused_vec)
         if return_kl:
             return fused, kl_losses
-        else:
-            return fused
+        return fused, {}
