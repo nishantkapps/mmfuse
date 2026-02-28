@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
-Standalone inference for MMFuse SData model.
-No mmfuse codebase required - only PyTorch and NumPy.
+Standalone inference for MMFuse SData model using current CLIP+Wav2Vec checkpoints.
+
+Requires the mmfuse codebase (to reuse the exact fusion + sensor encoders as training),
+plus a SData-style checkpoint (e.g. ckpt_sdata_epoch_20.pt or model_*_answer.pt)
+and precomputed embeddings (e.g. embeddings/sdata_clip or embeddings/nextqa_clip).
 
 Usage:
-  python standalone_sdata_inference.py --checkpoint model.pth --embeddings-dir /path/to/embeddings [--num-samples 10]
+  python scripts/standalone_sdata_inference.py \
+    --checkpoint mmfuse/checkpoints_clip_wav2vec_v3/ckpt_sdata_epoch_20.pt \
+    --embeddings-dir embeddings/sdata_clip \
+    --num-samples 10
 
 Outputs: action class (0-7) and movement (delta_along, delta_lateral, magnitude) per sample.
 """
@@ -12,78 +18,39 @@ Outputs: action class (0-7) and movement (delta_along, delta_lateral, magnitude)
 import argparse
 import json
 from pathlib import Path
+from typing import Dict, Tuple, Optional
 
 import torch
 import torch.nn as nn
-from typing import Dict, Tuple, Optional
 
-# --- Inlined model definitions (no mmfuse dependency) ---
+try:
+    from mmfuse.encoders.sensor_encoder import PressureSensorEncoder, EMGSensorEncoder
+    from mmfuse.fusion.multimodal_fusion import MultimodalFusionWithAttention
+    from config_modality import (
+        get_modality_dims,
+        FUSION_DIM,
+        AUDIO_DIM,
+        TEXT_DIM,
+        PRESSURE_DIM,
+        EMG_DIM,
+    )
+except ImportError:
+    # Fallback for running as a plain script from the repo root
+    import sys as _sys
 
-class SensorEncoder(nn.Module):
-    def __init__(self, input_dim: int, output_dim: int = 256, hidden_dim: int = 128, dropout: float = 0.2):
-        super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, output_dim),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.encoder(x)
-
-
-class PressureSensorEncoder(SensorEncoder):
-    def __init__(self, output_dim: int = 256, num_channels: int = 1, input_features: int = 100):
-        super().__init__(input_dim=input_features, output_dim=output_dim, hidden_dim=128)
-        self.num_channels = num_channels
-
-
-class EMGSensorEncoder(SensorEncoder):
-    def __init__(self, output_dim: int = 256, num_channels: int = 8, input_features: int = 100):
-        super().__init__(input_dim=input_features, output_dim=output_dim, hidden_dim=128)
-        self.num_channels = num_channels
-
-
-class MultimodalFusionWithAttention(nn.Module):
-    def __init__(self, modality_dims: Dict[str, int], fusion_dim: int = 512, num_heads: int = 8, dropout: float = 0.2):
-        super().__init__()
-        self.modality_dims = modality_dims
-        self.fusion_dim = fusion_dim
-        self.projections = nn.ModuleDict()
-        for modality, input_dim in modality_dims.items():
-            self.projections[modality] = nn.Sequential(
-                nn.Linear(input_dim, fusion_dim),
-                nn.BatchNorm1d(fusion_dim),
-                nn.ReLU(),
-            )
-        self.attention = nn.MultiheadAttention(
-            embed_dim=fusion_dim, num_heads=num_heads, dropout=dropout, batch_first=True
-        )
-        concat_dim = fusion_dim * len(modality_dims)
-        self.fusion_mlp = nn.Sequential(
-            nn.Linear(concat_dim, fusion_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(fusion_dim, fusion_dim),
-        )
-
-    def forward(self, embeddings: Dict[str, torch.Tensor], return_kl: bool = True) -> Tuple[torch.Tensor, dict]:
-        projected = {mod: self.projections[mod](emb) for mod, emb in embeddings.items()}
-        modality_names = sorted(projected.keys())
-        stacked = torch.stack([projected[n] for n in modality_names], dim=1)
-        attended, _ = self.attention(stacked, stacked, stacked)
-        flattened = attended.reshape(attended.size(0), -1)
-        fused = self.fusion_mlp(flattened)
-        kl_losses = {}
-        if return_kl:
-            return fused, kl_losses
-        return fused
+    _proj = Path(__file__).resolve().parent.parent
+    if str(_proj) not in _sys.path:
+        _sys.path.insert(0, str(_proj))
+    from encoders.sensor_encoder import PressureSensorEncoder, EMGSensorEncoder  # type: ignore
+    from fusion.multimodal_fusion import MultimodalFusionWithAttention  # type: ignore
+    from config_modality import (  # type: ignore
+        get_modality_dims,
+        FUSION_DIM,
+        AUDIO_DIM,
+        TEXT_DIM,
+        PRESSURE_DIM,
+        EMG_DIM,
+    )
 
 
 class ActionClassifier(nn.Module):
@@ -117,7 +84,7 @@ COMMAND_NAMES = [
 
 
 def main():
-    p = argparse.ArgumentParser(description="Standalone SData inference - no mmfuse required")
+    p = argparse.ArgumentParser(description="Standalone SData inference (CLIP+Wav2Vec MMFuse checkpoint)")
     p.add_argument("--checkpoint", required=True, help="Path to model .pth or .pt file")
     p.add_argument("--embeddings-dir", required=True, help="Path to precomputed embeddings (.pt files)")
     p.add_argument("--num-samples", type=int, default=10, help="Number of samples to run")
@@ -143,29 +110,32 @@ def main():
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
 
     num_classes = ckpt.get("num_classes", 8)
-    fusion_dim = ckpt.get("fusion_dim", 256)
-    vision_dim = ckpt.get("vision_dim", 3584)
-    audio_dim = 768
+    fusion_dim = ckpt.get("fusion_dim", FUSION_DIM)
 
-    # Try to load embedding config for vision_dim
+    # Use embedding config to infer vision/audio dims when possible (e.g. sdata_clip, nextqa_clip)
     emb_config_path = emb_dir / "config.json"
     if emb_config_path.exists():
         with open(emb_config_path) as f:
             emb_config = json.load(f)
-        vision_dim = emb_config.get("vision_dim", vision_dim)
+        vision_dim = emb_config.get("vision_dim", get_modality_dims(emb_config.get("vision_encoder", "clip"))["vision_camera1"])
+        audio_dim = emb_config.get("audio_dim", AUDIO_DIM)
         num_classes = emb_config.get("num_classes", num_classes)
+    else:
+        dims = get_modality_dims("clip")
+        vision_dim = dims["vision_camera1"]
+        audio_dim = AUDIO_DIM
 
     modality_dims = {
         "vision_camera1": vision_dim,
         "vision_camera2": vision_dim,
         "audio": audio_dim,
-        "text": 768,
-        "pressure": 256,
-        "emg": 256,
+        "text": TEXT_DIM,
+        "pressure": PRESSURE_DIM,
+        "emg": EMG_DIM,
     }
 
-    pressure_enc = PressureSensorEncoder(output_dim=256, input_features=2).to(device)
-    emg_enc = EMGSensorEncoder(output_dim=256, num_channels=3, input_features=4).to(device)
+    pressure_enc = PressureSensorEncoder(output_dim=PRESSURE_DIM, input_features=2).to(device)
+    emg_enc = EMGSensorEncoder(output_dim=EMG_DIM, num_channels=3, input_features=4).to(device)
     fusion = MultimodalFusionWithAttention(
         modality_dims=modality_dims,
         fusion_dim=fusion_dim,

@@ -241,20 +241,46 @@ def train_ablation(args, ablation_cfg: dict):
     cross_pair = emb_config.get("cross_pair", False)
     augment_variations = emb_config.get("augment_variations", 16)
 
-    if args.dataset:
-        # Split BEFORE augmentation (by video pairs) - correct for no leakage
+    # Prefer split stored in embeddings config (from precompute_sdata_embeddings with split-before-aug)
+    train_count = emb_config.get("train_count")
+    test_count = emb_config.get("test_count")
+    n_samples = len(ds.samples)
+    if (
+        train_count is not None
+        and test_count is not None
+        and train_count + test_count == n_samples
+    ):
+        train_idx = list(range(0, train_count))
+        test_idx = list(range(train_count, train_count + test_count))
+        log.info(
+            "Using split from embeddings config (train=%d | test=%d, total=%d)",
+            train_count,
+            test_count,
+            n_samples,
+        )
+    elif args.dataset:
+        # Split BEFORE augmentation (by video pairs) using raw dataset layout
         train_idx, test_idx = _get_train_test_indices_split_before_aug(
             Path(args.dataset),
             cross_pair=cross_pair,
             augment_variations=augment_variations,
-            num_embedding_files=len(ds.samples),
+            num_embedding_files=n_samples,
         )
-        log.info("Split before augmentation: %d train | %d test (by video pairs)", len(train_idx), len(test_idx))
+        # Guard against any out-of-range indices if sample counts differ
+        train_idx = [i for i in train_idx if 0 <= i < n_samples]
+        test_idx = [i for i in test_idx if 0 <= i < n_samples]
+        log.info(
+            "Split before augmentation from dataset: %d train | %d test (by video pairs)",
+            len(train_idx),
+            len(test_idx),
+        )
     else:
         # Fallback: split on flattened list (may leak - same pair in train and test)
         log.warning(
-            "No --dataset provided. Using 90/10 split on flattened embeddings (possible leakage). "
-            "Use --dataset path/to/sdata for correct split-before-augmentation."
+            "No split metadata in config and no --dataset provided. "
+            "Using 90/10 split on flattened embeddings (possible leakage). "
+            "For correct split-before-augmentation, re-run precompute_sdata_embeddings "
+            "so config.json has train_count/test_count, or pass --dataset path/to/sdata."
         )
         labels = [
             torch.load(p, map_location="cpu", weights_only=True)["target"]
@@ -262,11 +288,11 @@ def train_ablation(args, ablation_cfg: dict):
         ]
         try:
             train_idx, test_idx = train_test_split(
-                range(len(ds)), test_size=0.1, stratify=labels, random_state=42
+                range(n_samples), test_size=0.1, stratify=labels, random_state=42
             )
         except ValueError:
             train_idx, test_idx = train_test_split(
-                range(len(ds)), test_size=0.1, random_state=42
+                range(n_samples), test_size=0.1, random_state=42
             )
     train_ds = Subset(ds, train_idx)
     test_ds = Subset(ds, test_idx)

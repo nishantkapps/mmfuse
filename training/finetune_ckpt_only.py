@@ -203,6 +203,12 @@ def main():
     if movement_targets is not None and use_movement:
         movement_targets = movement_targets.to(device)
 
+    # Training history for analysis / plotting
+    history = {
+        "train_loss": [],
+        "train_acc": [],
+        "val_acc": [],
+    }
     best_val_acc = 0.0
     best_state = None
     epochs_no_improve = 0
@@ -249,8 +255,11 @@ def main():
             total += targets.size(0)
         if scheduler is not None and args.scheduler == "cosine":
             scheduler.step()
-        train_acc = correct / total if total else 0
-        log.info("Epoch %d train loss=%.4f acc=%.2f%%", epoch + 1, total_loss / len(train_dl) if train_dl else 0, 100 * train_acc)
+        train_loss_epoch = total_loss / len(train_dl) if train_dl else 0.0
+        train_acc = correct / total if total else 0.0
+        history["train_loss"].append(train_loss_epoch)
+        history["train_acc"].append(train_acc)
+        log.info("Epoch %d train loss=%.4f acc=%.2f%%", epoch + 1, train_loss_epoch, 100 * train_acc)
 
         model.eval()
         correct_v, total_v = 0, 0
@@ -270,7 +279,8 @@ def main():
                 logits, _, _ = model(emb, return_kl=True)
                 correct_v += (logits.argmax(dim=1) == targets).sum().item()
                 total_v += targets.size(0)
-        val_acc = correct_v / total_v if total_v else 0
+        val_acc = correct_v / total_v if total_v else 0.0
+        history["val_acc"].append(val_acc)
         log.info("Epoch %d val acc=%.2f%%", epoch + 1, 100 * val_acc)
         if val_acc > best_val_acc:
             best_val_acc = val_acc
@@ -314,6 +324,25 @@ def main():
     }
     torch.save(save_ckpt, out_path)
     log.info("Saved fine-tuned model to %s", out_path)
+    # Save simple JSON history alongside the model (loss/acc per epoch)
+    try:
+        import json as _json
+        hist_path = out_path.with_suffix(out_path.suffix + ".history.json")
+        with open(hist_path, "w") as f:
+            _json.dump(
+                {
+                    "train_loss": history.get("train_loss", []),
+                    "train_acc": history.get("train_acc", []),
+                    "val_acc": history.get("val_acc", []),
+                    "best_val_acc": best_val_acc,
+                    "epochs_run": len(history.get("train_loss", [])),
+                },
+                f,
+                indent=2,
+            )
+        log.info("Saved training history to %s", hist_path)
+    except Exception as e:
+        log.warning("Could not save training history: %s", e)
     return 0
 
 
