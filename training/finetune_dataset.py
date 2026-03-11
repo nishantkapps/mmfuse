@@ -78,27 +78,12 @@ class FinetuneDataset(Dataset):
             if sample:
                 self.samples.append(sample)
 
-    def _resolve_video_path(self, vid: str, rel_path: str) -> Path:
-        """Resolve video path; if not found and path is under videos/, search subfolders for matching file."""
-        p = self.data_dir / rel_path
-        if p.exists():
-            return p
-        videos_dir = self.data_dir / "videos"
-        if not videos_dir.exists():
-            return p
-        # Search recursively for {vid}.mp4 or file with stem == vid
-        for f in videos_dir.rglob("*.mp4"):
-            if f.stem == vid or f.name == f"{vid}.mp4":
-                return f
-        return p
-
     def _parse_row(self, row: dict) -> dict | None:
         """Parse row to {video_path, video_path_2?, text?, target}."""
         vid = row.get("video_id", row.get("video", ""))
         vp = row.get("video_path", f"videos/{vid}.mp4")
         if not Path(vp).is_absolute():
-            rel = vp if vp.startswith("videos/") else f"videos/{vid}.mp4"
-            vp = str(self._resolve_video_path(vid, rel))
+            vp = str(self.data_dir / vp) if vp.startswith("videos/") else str(self.data_dir / "videos" / f"{vid}.mp4")
 
         target = row.get("target")
         if target is None:
@@ -123,17 +108,8 @@ class FinetuneDataset(Dataset):
         out = {"video_path": vp, "target": target}
         if text:
             out["text"] = text
-        # NextQA reasoning type: causal, temporal, descriptive (for evaluation metrics)
-        rt = row.get("reasoning_type", row.get("type", row.get("question_type")))
-        if rt is not None:
-            out["reasoning_type"] = str(rt).strip().lower()
         if "video_path_2" in row:
-            vp2 = row["video_path_2"]
-            if Path(vp2).is_absolute():
-                out["video_path_2"] = vp2
-            else:
-                vid2 = Path(vp2).stem
-                out["video_path_2"] = str(self._resolve_video_path(vid2, vp2 if vp2.startswith("videos/") else f"videos/{vid2}.mp4"))
+            out["video_path_2"] = str(self.data_dir / row["video_path_2"]) if not Path(row["video_path_2"]).is_absolute() else row["video_path_2"]
         return out
 
     def __len__(self):
@@ -152,33 +128,7 @@ class FinetuneDataset(Dataset):
             out["frame2"] = torch.from_numpy(frame2).permute(2, 0, 1).float() / 255.0
         if "text" in s:
             out["text"] = s["text"]
-        if "reasoning_type" in s:
-            out["reasoning_type"] = s["reasoning_type"]
         return out
-
-
-class PrecomputedFinetuneDataset(Dataset):
-    """
-    Loads precomputed embeddings from embeddings/<name>/ (e.g. from precompute_video_text.py).
-    Each sample is a .pt file with keys: vision_camera1, vision_camera2, audio, text, target.
-    Use this with --embeddings-dir to avoid running the vision encoder in the training loop (avoids NaN issues).
-    """
-
-    def __init__(self, embeddings_dir: Path, max_samples: int = None):
-        self.embeddings_dir = Path(embeddings_dir)
-        with open(self.embeddings_dir / "config.json") as f:
-            self.config = json.load(f)
-        pt_files = sorted(self.embeddings_dir.glob("*.pt"))
-        if max_samples:
-            pt_files = pt_files[:max_samples]
-        self.pt_files = pt_files
-
-    def __len__(self):
-        return len(self.pt_files)
-
-    def __getitem__(self, idx):
-        data = torch.load(self.pt_files[idx], map_location="cpu", weights_only=True)
-        return data
 
 
 def collate_finetune(batch):
@@ -190,20 +140,6 @@ def collate_finetune(batch):
         out["frame2"] = torch.stack([b["frame2"] for b in batch])
     if "text" in batch[0]:
         out["text"] = [b["text"] for b in batch]
-    if "reasoning_type" in batch[0]:
-        out["reasoning_type"] = [b["reasoning_type"] for b in batch]
-    return out
-
-
-def collate_precomputed(batch):
-    """Collate batch of precomputed embedding dicts. Stack each modality; stack targets."""
-    targets = torch.tensor([b["target"] for b in batch], dtype=torch.long)
-    keys = [k for k in batch[0] if k != "target" and k != "reasoning_type" and isinstance(batch[0][k], torch.Tensor)]
-    out = {"target": targets}
-    for k in keys:
-        out[k] = torch.stack([b[k] for b in batch])
-    if "reasoning_type" in batch[0]:
-        out["reasoning_type"] = [b.get("reasoning_type") for b in batch]
     return out
 
 

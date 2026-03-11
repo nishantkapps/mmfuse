@@ -72,9 +72,7 @@ class MMFuseFinetuneModel(nn.Module):
         self,
         embeddings: dict,
         return_kl: bool = False,
-        use_answer_head: bool = False,
     ):
-        """Forward pass. use_answer_head: when True, same head is used as multiple-choice answer head (e.g. NextQA 5-way)."""
         fused, kl_losses = self.fusion(embeddings, return_kl=True)
         action_logits = self.action_head(fused)
         movement = self.movement_head(fused) if self.movement_head is not None else None

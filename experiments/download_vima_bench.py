@@ -21,13 +21,11 @@ After download, run precompute and finetune:
 Usage:
   python experiments/download_vima_bench.py --max-samples 500
   python experiments/download_vima_bench.py --zip-path /path/to/vima.zip --max-samples 1000
-  python experiments/download_vima_bench.py --force --max-samples 500   # re-download and overwrite invalid data
+  python experiments/download_vima_bench.py --small --max-samples 500   # ~300MB LeRobot, annotations + videos
+  python experiments/download_vima_bench.py --small --max-samples 500 --max-gb 5   # Stay under 5GB
 
-Fast path (recommended for large zip): extract the zip once, then run from disk (minutes instead of overnight):
-  unzip -q vima.zip -d vima_extracted   # or 7z x vima.zip -o vima_extracted
-  python experiments/download_vima_bench.py --extracted-dir vima_extracted --max-samples 500
-
-Requires: pip install huggingface_hub imageio imageio-ffmpeg opencv-python
+Requires: pip install huggingface_hub pandas pyarrow
+  For video extraction: opencv-python (cv2)
 """
 
 import argparse
@@ -37,6 +35,8 @@ import shutil
 import sys
 import zipfile
 from pathlib import Path
+
+import numpy as np
 
 _proj_root = Path(__file__).resolve().parent.parent
 
@@ -68,6 +68,183 @@ TASK_TO_LEVEL = {
     "pick_in_order_then_restore": 2,
 }
 LEVEL_NAMES = ["L1 (Object Placement)", "L2 (Novel Combination)", "L3 (Novel Object)"]
+
+
+def download_vima_bench_small(
+    out_dir: Path,
+    max_samples: int = 500,
+    max_gb: float = 5.0,
+) -> bool:
+    """
+    Download LeRobot level1: annotations + videos. Stays under max_gb (default 5GB).
+    Uses parquet + snapshot_download for videos, extracts per-episode clips.
+    """
+    try:
+        from huggingface_hub import hf_hub_download, snapshot_download
+        import pandas as pd
+    except ImportError:
+        print("Install: pip install huggingface_hub pandas pyarrow")
+        return False
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    videos_dir = out_dir / "videos"
+    videos_dir.mkdir(exist_ok=True)
+    cache_dir = out_dir / "cache_lerobot"
+    cache_dir.mkdir(exist_ok=True)
+
+    ann_path = out_dir / "annotations.json"
+    max_bytes = int(max_gb * 1024 * 1024 * 1024)
+
+    # 1. Download parquet
+    print("Downloading parquet (~64MB)...")
+    try:
+        parquet_path = hf_hub_download(
+            repo_id="lerobot-data-collection/level1_final_quality0",
+            filename="data/chunk-000/file-000.parquet",
+            repo_type="dataset",
+            local_dir=cache_dir,
+            local_dir_use_symlinks=False,
+        )
+        parquet_path = Path(parquet_path)
+    except Exception as e:
+        print(f"  Failed: {e}")
+        return False
+
+    df = pd.read_parquet(parquet_path)
+    ep_col = "episode_index" if "episode_index" in df.columns else next(
+        (c for c in df.columns if "episode" in str(c).lower()), df.columns[0]
+    )
+    task_col = "task_index" if "task_index" in df.columns else None
+    idx_col = "index" if "index" in df.columns else "frame_index" if "frame_index" in df.columns else None
+
+    def _scalar(x):
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return 0
+        if isinstance(x, (list, tuple)):
+            return int(x[0]) if x else 0
+        return int(x)
+
+    # Group by episode -> frame indices
+    ep_to_frames = {}
+    ep_to_task = {}
+    for i, row in df.iterrows():
+        ep = _scalar(row.get(ep_col, i))
+        if ep not in ep_to_frames:
+            ep_to_frames[ep] = []
+            ep_to_task[ep] = _scalar(row.get(task_col, 0)) if task_col else 0
+        ep_to_frames[ep].append(i)
+
+    episodes = sorted(ep_to_frames.keys())[:max_samples]
+    if not episodes:
+        print("No episodes found.")
+        return False
+
+    # 2. Download video chunk (observation.images.base only, ~70MB)
+    print("Downloading video chunk (~70MB)...")
+    try:
+        snapshot_download(
+            repo_id="lerobot-data-collection/level1_final_quality0",
+            repo_type="dataset",
+            local_dir=cache_dir,
+            allow_patterns=[
+                "videos/observation.images.base/chunk-000/*.mp4",
+                "meta/info.json",
+            ],
+        )
+    except Exception as e:
+        print(f"  Video download failed: {e}")
+        print("  Saving annotations only (no videos).")
+        rows = [
+            {
+                "video_id": f"lerobot_L1_ep{ep}",
+                "video_path": f"videos/lerobot_L1_ep{ep}.mp4",
+                "text": LEVEL_NAMES[min(ep_to_task.get(ep, 0), 2)],
+                "target": min(ep_to_task.get(ep, 0), 2),
+            }
+            for ep in episodes
+        ]
+        with open(ann_path, "w") as f:
+            json.dump(rows, f, indent=2)
+        return True
+
+    # Find video file (snapshot_download structure may vary)
+    video_files = list(cache_dir.rglob("observation.images.base/**/*.mp4"))
+    if not video_files:
+        video_files = list(cache_dir.rglob("**/chunk-000/*.mp4"))
+    src_video = video_files[0] if video_files else None
+
+    rows = []
+    if src_video and src_video.exists():
+        print("Extracting per-episode videos...")
+        try:
+            import cv2
+            cap = cv2.VideoCapture(str(src_video))
+            fps = cap.get(cv2.CAP_PROP_FPS) or 10.0
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
+            for j, ep in enumerate(episodes):
+                if j % 50 == 0:
+                    print(f"  Episodes {j}/{len(episodes)}...")
+                frame_indices = ep_to_frames[ep]
+                if not frame_indices:
+                    continue
+                frame_indices = sorted(set(frame_indices))
+                out_path = videos_dir / f"lerobot_L1_ep{ep}.mp4"
+                if out_path.exists():
+                    rows.append({
+                        "video_id": f"lerobot_L1_ep{ep}",
+                        "video_path": f"videos/lerobot_L1_ep{ep}.mp4",
+                        "text": LEVEL_NAMES[min(ep_to_task.get(ep, 0), 2)],
+                        "target": min(ep_to_task.get(ep, 0), 2),
+                    })
+                    continue
+
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                out = cv2.VideoWriter(str(out_path), fourcc, fps, (w, h))
+                for idx in frame_indices[:150]:
+                    if idx < total_frames:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                        ret, frame = cap.read()
+                        if ret and frame is not None:
+                            out.write(frame)
+                out.release()
+                rows.append({
+                    "video_id": f"lerobot_L1_ep{ep}",
+                    "video_path": f"videos/lerobot_L1_ep{ep}.mp4",
+                    "text": LEVEL_NAMES[min(ep_to_task.get(ep, 0), 2)],
+                    "target": min(ep_to_task.get(ep, 0), 2),
+                })
+
+            cap.release()
+        except Exception as e:
+            print(f"  Extract failed: {e}. Saving annotations only.")
+            rows = [
+                {
+                    "video_id": f"lerobot_L1_ep{ep}",
+                    "video_path": f"videos/lerobot_L1_ep{ep}.mp4",
+                    "text": LEVEL_NAMES[min(ep_to_task.get(ep, 0), 2)],
+                    "target": min(ep_to_task.get(ep, 0), 2),
+                }
+                for ep in episodes
+            ]
+    else:
+        rows = [
+            {
+                "video_id": f"lerobot_L1_ep{ep}",
+                "video_path": f"videos/lerobot_L1_ep{ep}.mp4",
+                "text": LEVEL_NAMES[min(ep_to_task.get(ep, 0), 2)],
+                "target": min(ep_to_task.get(ep, 0), 2),
+            }
+            for ep in episodes
+        ]
+
+    with open(ann_path, "w") as f:
+        json.dump(rows, f, indent=2)
+
+    n_vids = len(list(videos_dir.glob("*.mp4")))
+    print(f"VIMA-Bench (small) done. {len(rows)} samples, {n_vids} videos.")
+    return True
 
 
 def _get_task_from_trajectory_pkl(pkl_path: Path) -> str | None:
@@ -454,21 +631,23 @@ def main():
                    help="When using --extracted-dir: take up to this many samples per task folder (e.g. 500 for 500 from each of rearrange_then_restore and sweep_without_exceeding). Use with --max-samples 1000 for 500+500.")
     p.add_argument("--skip-videos", action="store_true",
                    help="Skip video creation (annotations only; precompute needs videos)")
-    p.add_argument("--force", action="store_true",
-                   help="Remove existing annotations and videos, then re-download/recreate (use after invalid or LeRobot data)")
+    p.add_argument("--small", action="store_true",
+                   help="Use LeRobot level1 (~300MB) instead of VIMA (21.5GB) when disk space is limited")
+    p.add_argument("--max-gb", type=float, default=5.0,
+                   help="With --small: max download size in GB (default 5)")
 
     args = p.parse_args()
     out_dir = Path(args.out_dir) if args.out_dir else _proj_root / "extdataset" / "vima_bench"
 
-    ok = download_vima_bench(
-        out_dir,
-        max_samples=args.max_samples,
-        zip_path=Path(args.zip_path) if args.zip_path else None,
-        extracted_dir=Path(args.extracted_dir) if args.extracted_dir else None,
-        max_samples_per_task=args.max_samples_per_task,
-        skip_videos=args.skip_videos,
-        force=args.force,
-    )
+    if args.small:
+        ok = download_vima_bench_small(out_dir, max_samples=args.max_samples, max_gb=args.max_gb)
+    else:
+        ok = download_vima_bench(
+            out_dir,
+            max_samples=args.max_samples,
+            zip_path=Path(args.zip_path) if args.zip_path else None,
+            skip_videos=args.skip_videos,
+        )
     return 0 if ok else 1
 
 

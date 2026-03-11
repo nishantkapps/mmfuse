@@ -437,6 +437,8 @@ def main():
     p.add_argument("--max-samples", type=int, default=None)
     p.add_argument("--video-zips", type=int, default=None,
                    help="VideoMME: 1-21 (default 5). EgoSchema: 1-5 (default 2). 0 = skip videos.")
+    p.add_argument("--small", action="store_true",
+                   help="VIMA-Bench: use LeRobot (~300MB) instead of full VIMA (21.5GB)")
     p.add_argument("--out-dir", default=None)
     args = p.parse_args()
 
@@ -467,11 +469,11 @@ def main():
             import sys
             cfg = DEFAULTS.get("vima_bench", {"max_samples": 500})
             max_vima = args.max_samples if args.max_samples is not None else cfg["max_samples"]
-            r = subprocess.run(
-                [sys.executable, str(_proj_root / "experiments" / "download_vima_bench.py"),
-                 "--out-dir", str(out), "--max-samples", str(max_vima)],
-                cwd=str(_proj_root),
-            )
+            cmd = [sys.executable, str(_proj_root / "experiments" / "download_vima_bench.py"),
+                   "--out-dir", str(out), "--max-samples", str(max_vima)]
+            if getattr(args, "small", False):
+                cmd.append("--small")
+            r = subprocess.run(cmd, cwd=str(_proj_root))
             if r.returncode == 0:
                 ok += 1
         elif name == "egoschema":

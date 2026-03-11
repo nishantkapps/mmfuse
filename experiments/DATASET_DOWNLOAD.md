@@ -164,18 +164,17 @@ python experiments/download_datasets_full.py egoschema --max-samples 500 --video
 **Source:** [VIMA-Bench GitHub](https://github.com/vimalabs/VIMABench) | [HuggingFace VIMA/VIMA-Data](https://huggingface.co/datasets/VIMA/VIMA-Data)  
 **Note:** VIMA-Bench is simulator-based. For embedding-based eval, use pre-recorded trajectories or export frames.
 
+**Option A – Small (~300MB, when disk space is limited):**
 ```bash
-mkdir -p extdataset/vima_bench
-cd extdataset/vima_bench
+pip install datasets
+python experiments/download_vima_bench.py --small --max-samples 500
 ```
+Uses LeRobot level1 instead of full VIMA (21.5GB).
 
-**Option A – Simulator (recommended):** Clone and run the VIMA-Bench simulator for L1/L2/L3 evaluation. See [VIMABench](https://github.com/vimalabs/VIMABench).
-
-**Option B – Precomputed frames:** Download VIMA-Data from HuggingFace. Create `annotations.json` with `video_path`, `text` (task prompt), `target` (0=L1, 1=L2, 2=L3).
-
+**Option B – Full VIMA (21.5 GB):**
 ```bash
-pip install huggingface_hub
-# Download VIMA-Data and extract trajectories; map to L1/L2/L3 by task type
+python experiments/download_vima_bench.py --max-samples 500
+# Or with local zip: --zip-path /path/to/vima.zip
 ```
 
 **Expected layout:** `extdataset/vima_bench/annotations.json` with `target`: 0=L1, 1=L2, 2=L3.
