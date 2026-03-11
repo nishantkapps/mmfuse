@@ -218,7 +218,13 @@ class RoboticFeedbackSystem(nn.Module):
             window_size=50
         )  # (batch, num_features)
         emg_embedding = self.emg_encoder(emg_features)
+        # Collapse temporal dimension if encoder returned sequence embeddings
+        if emg_embedding.dim() == 3:
+            emg_embedding = emg_embedding.mean(dim=1)
         embeddings['emg'] = emg_embedding
+        
+        # ===== Printing shapes for all embeddings =====
+        # print({k: v.shape for k,v in embeddings.items()})
         
         # ===== Fuse all modalities =====
         fused = self.fusion_module(embeddings)
