@@ -27,6 +27,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import cv2
+from sklearn.metrics import precision_recall_fscore_support
 
 from mmfuse.preprocessing.preprocessor import VisionPreprocessor, AudioPreprocessor
 from mmfuse.encoders.vision_encoder import VisionEncoder
@@ -582,7 +583,15 @@ def train(args):
     total_batches = len(train_dl)
     log_interval = max(1, total_batches // 10)  # log ~10 times per epoch
     epoch_times = []
-    history = {'train_loss': [], 'train_acc': [], 'test_acc': [], 'epoch_sec': []}
+    history = {
+        'train_loss': [],
+        'train_acc': [],
+        'test_acc': [],
+        'test_precision': [],
+        'test_recall': [],
+        'test_f1': [],
+        'epoch_sec': [],
+    }
 
     for epoch in range(args.epochs):
         epoch_start = time.perf_counter()
@@ -590,6 +599,7 @@ def train(args):
         fusion.train()
         epoch_loss = 0.0
         epoch_kl = 0.0
+        epoch_contrast = 0.0
         epoch_movement = 0.0
         correct = 0
         total = 0
@@ -605,10 +615,19 @@ def train(args):
             movement_pred = movement_head(fused)
 
             loss_bc = criterion(logits, targets)
-            loss_kl = sum(kl_losses.values()) if kl_losses else torch.tensor(0.0, device=device)
+            #loss_kl = sum(kl_losses.values()) if kl_losses else torch.tensor(0.0, device=device)
             movement_targets_batch = movement_targets[targets]
             loss_movement = nn.functional.mse_loss(movement_pred, movement_targets_batch)
-            loss = loss_bc + args.kl_weight * loss_kl + args.movement_weight * loss_movement
+            #loss = loss_bc + args.kl_weight * loss_kl + args.movement_weight * loss_movement
+
+            kl_loss = kl_losses.get("kl_camera", torch.tensor(0.0, device=device))
+            contrast_loss = kl_losses.get("contrastive_3way", torch.tensor(0.0, device=device))
+            loss = (
+                loss_bc
+                + args.kl_weight * kl_loss
+                + args.contrast_weight * contrast_loss
+                + args.movement_weight * loss_movement
+            )
 
             optimizer.zero_grad()
             loss.backward()
@@ -622,10 +641,19 @@ def train(args):
             epoch_loss += lb if (lb == lb and abs(lb) != float('inf')) else 0.0
             if args.movement_weight > 0:
                 epoch_movement += loss_movement.item() if torch.isfinite(loss_movement) else 0.0
+            #if kl_losses:
+            #    for v in kl_losses.values():
+            #        kv = v.item()
+            #        epoch_kl += kv if (kv == kv and abs(kv) != float('inf')) else 0.0
             if kl_losses:
-                for v in kl_losses.values():
-                    kv = v.item()
+                kl_val = kl_losses.get("kl_camera")
+                contrast_val = kl_losses.get("contrastive_3way")
+                if kl_val is not None:
+                    kv = kl_val.item()
                     epoch_kl += kv if (kv == kv and abs(kv) != float('inf')) else 0.0
+                if contrast_val is not None:
+                    cv = contrast_val.item()
+                    epoch_contrast += cv if (cv == cv and abs(cv) != float('inf')) else 0.0        
             pred = logits.argmax(dim=1)
             correct += (pred == targets).sum().item()
             total += len(batch)
@@ -640,6 +668,7 @@ def train(args):
         train_count = len(train_dl)
         train_acc = correct / total if total > 0 else 0
         kl_str = f" | KL={epoch_kl/train_count:.4f}" if kl_losses else ""
+        contrast_str = f" | Contrast={epoch_contrast/train_count:.4f}" if kl_losses else ""
 
         # Test evaluation
         model.eval()
@@ -647,6 +676,7 @@ def train(args):
         movement_head.eval()
         test_correct, test_total = 0, 0
         test_movement_mse = 0.0
+        y_true, y_pred = [], []
         with torch.no_grad():
             for batch in test_dl:
                 targets = torch.tensor([s['target'] for s in batch], dtype=torch.long).to(device)
@@ -656,10 +686,24 @@ def train(args):
                 pred = logits.argmax(dim=1)
                 test_correct += (pred == targets).sum().item()
                 test_total += len(batch)
+                y_true.extend(targets.cpu().numpy().tolist())
+                y_pred.extend(pred.cpu().numpy().tolist())
                 mt = movement_targets[targets]
                 test_movement_mse += nn.functional.mse_loss(movement_pred, mt).item() * len(batch)
         test_acc = test_correct / test_total if test_total > 0 else 0
         test_movement_mse = test_movement_mse / test_total if test_total > 0 else 0.0
+
+        # Macro precision/recall/F1 over test set
+        if y_true and y_pred:
+            prec, rec, f1, _ = precision_recall_fscore_support(
+                y_true,
+                y_pred,
+                average='macro',
+                zero_division=0,
+            )
+        else:
+            prec, rec, f1 = 0.0, 0.0, 0.0
+
         model.train()
         fusion.train()
         movement_head.train()
@@ -672,12 +716,28 @@ def train(args):
         eta_str = f" | ETA {eta_sec/60:.1f}min" if remaining_epochs > 0 else ""
 
         movement_str = f" | mov={epoch_movement/train_count:.4f} test_mov={test_movement_mse:.4f}" if args.movement_weight > 0 else ""
-        log.info("Epoch %d/%d done in %.1fs | train_loss=%.4f train_acc=%.4f test_acc=%.4f%s%s%s",
-                 epoch + 1, args.epochs, epoch_sec, epoch_loss / train_count, train_acc, test_acc, kl_str, movement_str, eta_str)
+        prf_str = f" | prec={prec:.4f} rec={rec:.4f} f1={f1:.4f}"
+        log.info(
+            "Epoch %d/%d done in %.1fs | train_loss=%.4f train_acc=%.4f test_acc=%.4f%s%s%s%s%s",
+            epoch + 1,
+            args.epochs,
+            epoch_sec,
+            epoch_loss / train_count,
+            train_acc,
+            test_acc,
+            kl_str,
+            contrast_str,
+            movement_str,
+            prf_str,
+            eta_str,
+        )
 
         history['train_loss'].append(epoch_loss / train_count)
         history['train_acc'].append(train_acc)
         history['test_acc'].append(test_acc)
+        history['test_precision'].append(prec)
+        history['test_recall'].append(rec)
+        history['test_f1'].append(f1)
         history['epoch_sec'].append(epoch_sec)
 
         audio_enc = emb_config.get('audio_encoder', args.audio_encoder) if emb_config else args.audio_encoder
@@ -745,7 +805,8 @@ def main():
                    help='With --finetune-encoders: unfreeze only last N vision encoder layers (0 = unfreeze all). E.g. 1 or 2 to limit trainable params.')
     p.add_argument('--unfreeze-audio-layers', type=int, default=0, metavar='N',
                    help='With --finetune-encoders: unfreeze only last N audio encoder layers (0 = unfreeze all). E.g. 1 or 2 to limit trainable params.')
-    p.add_argument('--kl-weight', type=float, default=0.1)
+    p.add_argument('--kl-weight', type=float, default=0.05,help='Weight for KL loss')
+    p.add_argument('--contrast-weight', type=float, default=0.1,help='Weight for contrastive alignment loss')
     p.add_argument('--num-heads', type=int, default=8)
     p.add_argument('--dropout', type=float, default=0.2)
     p.add_argument('--cross-pair', action='store_true', help='Pair each audio with all video pairs in same part (larger dataset)')
