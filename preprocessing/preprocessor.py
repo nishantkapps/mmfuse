@@ -3,6 +3,7 @@ Data preprocessing pipelines for different modalities
 Handles normalization, resizing, and format conversion
 """
 
+import json
 import torch
 import torch.nn.functional as F
 import numpy as np

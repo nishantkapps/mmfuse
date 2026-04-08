@@ -8,6 +8,9 @@
 /models/vosk-model-small-en-in-0.4/
 /models/sdata_test/
 /models/sdata_viscop/
+/robot_policy_eval/outputs/
+/sdata_vla_benchmark/outputs/
+/mmfuse.egg-info/
 *.png
 *.ods
 *.mp4
