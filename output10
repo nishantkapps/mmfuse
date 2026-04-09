@@ -1,0 +1,152 @@
+[
+    {
+        "timestamp": 0.0,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 0.0,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 0.11484575271606445,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 0.41997528076171875,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 0.7178401947021484,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 1.0164752006530762,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 1.3171491622924805,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 1.6134939193725586,
+        "value": 917,
+        "category": "very high"
+    },
+    {
+        "timestamp": 1.916837453842163,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 2.217700481414795,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 2.5165891647338867,
+        "value": 953,
+        "category": "very high"
+    },
+    {
+        "timestamp": 2.81787109375,
+        "value": 887,
+        "category": "high"
+    },
+    {
+        "timestamp": 3.119023084640503,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 3.4136924743652344,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 3.7153518199920654,
+        "value": 978,
+        "category": "very high"
+    },
+    {
+        "timestamp": 4.015942335128784,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 4.3172385692596436,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 4.6173505783081055,
+        "value": 978,
+        "category": "very high"
+    },
+    {
+        "timestamp": 4.925447940826416,
+        "value": 979,
+        "category": "very high"
+    },
+    {
+        "timestamp": 5.218456745147705,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 5.5138304233551025,
+        "value": 810,
+        "category": "high"
+    },
+    {
+        "timestamp": 5.816313743591309,
+        "value": 998,
+        "category": "very high"
+    },
+    {
+        "timestamp": 6.12114953994751,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 6.422358512878418,
+        "value": 911,
+        "category": "very high"
+    },
+    {
+        "timestamp": 6.723922967910767,
+        "value": 999,
+        "category": "very high"
+    },
+    {
+        "timestamp": 7.010826349258423,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 7.32186484336853,
+        "value": 998,
+        "category": "very high"
+    },
+    {
+        "timestamp": 7.617081880569458,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 7.9223854541778564,
+        "value": 0,
+        "category": "very light"
+    },
+    {
+        "timestamp": 8.226510524749756,
+        "value": 1000,
+        "category": "very high"
+    }
+]
