@@ -1,20 +1,10 @@
 import cv2
 import numpy as np
 import pandas as pd
+import os
 
+video_folder = "videos"   # change this
 
-
-cap = cv2.VideoCapture("cam1.mp4")
-
-# Read first frame
-ret, frame = cap.read()
-if not ret:
-    raise Exception("Failed to read video")
-
-fps = cap.get(cv2.CAP_PROP_FPS)
-frame_id = 0
-
-data = []
 # Define orange range
 lower_orange = np.array([5, 100, 100])
 upper_orange = np.array([20, 255, 255])
@@ -42,66 +32,84 @@ def get_center(frame):
 
     return (cx, cy), (x, y, w, h), mask
 
-# --- ORIGIN ---
-(center, box, mask) = get_center(frame)
-if center is None:
-    raise Exception("No orange object detected")
 
-origin_x, origin_y = center
+# --- GLOBAL STORAGE ---
+all_data = []
+video_id = 0
+global_id = 0
 
-prev_cx, prev_cy = center
-
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    center, box, mask = get_center(frame)
-
-    if center is None:
-        print("Lost object")
+# Loop through videos
+for file in os.listdir(video_folder):
+    if not file.lower().endswith((".mp4", ".avi", ".mov", ".mkv")):
         continue
 
-    cx, cy = center
-    x, y, w, h = box
+    video_id += 1
+    video_path = os.path.join(video_folder, file)
 
-    # Frame-to-frame motion
-    dx = cx - prev_cx
-    dy = cy - prev_cy
+    print(f"Processing: {file}")
 
-    # Global position
-    X = cx - origin_x
-    Y = cy - origin_y
+    cap = cv2.VideoCapture(video_path)
 
-    print(f"dx={dx:.2f}, dy={dy:.2f} | X={X:.2f}, Y={Y:.2f}")
+    ret, frame = cap.read()
+    if not ret:
+        print("Skipping (can't read)")
+        continue
 
-    # Draw
-    cv2.rectangle(frame, (x, y), (x+w, y+h), (255,0,0), 2)
-    cv2.circle(frame, (cx, cy), 5, (0,0,255), -1)
-    cv2.circle(frame, (origin_x, origin_y), 5, (255,0,0), -1)
-    cv2.line(frame, (origin_x, origin_y), (cx, cy), (0,255,0), 2)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_id = 0
 
-    prev_cx, prev_cy = cx, cy
+    # --- ORIGIN ---
+    center, box, mask = get_center(frame)
+    if center is None:
+        print("No object detected in first frame, skipping")
+        cap.release()
+        continue
 
-    cv2.imshow("Tracking", frame)
-    cv2.imshow("Mask", mask)
+    origin_x, origin_y = center
+    prev_cx, prev_cy = center
 
-    t = frame_id / fps
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-    data.append({
-        "t": t,
-        "X": X,
-        "Y": Y,
-        "dx": dx,
-        "dy": dy
-    })
+        center, box, mask = get_center(frame)
 
-    frame_id += 1
+        if center is None:
+            continue
 
-    if cv2.waitKey(30) & 0xFF == 27:
-        break
-    
-df = pd.DataFrame(data)
-df.to_csv("trajectory.csv", index=False)
-cap.release()
+        cx, cy = center
+
+        dx = cx - prev_cx
+        dy = cy - prev_cy
+
+        X = cx - origin_x
+        Y = cy - origin_y
+
+        frame_id += 1
+        t = frame_id / fps
+
+        global_id += 1
+
+        all_data.append({
+            "id": global_id,
+            "video_id": video_id,
+            "video_name": file,
+            "t": t,
+            "X": X,
+            "Y": Y,
+            "dx": dx,
+            "dy": dy
+        })
+
+        prev_cx, prev_cy = cx, cy
+
+    cap.release()
+
+# --- SAVE ONCE ---
+df = pd.DataFrame(all_data)
+df.to_csv("all_trajectories.csv", index=False)
+
+print("Saved all data to all_trajectories.csv")
+
 cv2.destroyAllWindows()
