@@ -1,8 +1,7 @@
 import os
 import shutil
 
-# Base path like C:\P101, C:\P102, ...
-base_prefix = r"C:\P"
+base_prefix = r"C:\V01\P"
 
 video_out = "videos"
 audio_out = "audios"
@@ -12,8 +11,11 @@ os.makedirs(audio_out, exist_ok=True)
 
 vid_counter = 1
 
-for p in range(101, 141):  # P101 → P140
-    person_path = f"{base_prefix}{p}"
+for p in range(10, 110):  # P10 → P109
+    if p < 100:
+        person_path = f"{base_prefix}0{p}"
+    else:
+        person_path = f"{base_prefix}{p}"
 
     if not os.path.exists(person_path):
         continue
@@ -22,7 +24,6 @@ for p in range(101, 141):  # P101 → P140
 
     for root, dirs, files in os.walk(person_path):
 
-        # Look specifically for cam1.mp4 and mic.wav
         if "cam1.mp4" in files and "mic.wav" in files:
 
             cam_path = os.path.join(root, "cam1.mp4")
