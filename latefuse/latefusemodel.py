@@ -1,7 +1,12 @@
 import pandas as pd
 import numpy as np
+import torch
+import torch.nn as nn
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from torch.utils.data import Dataset, DataLoader
+import matplotlib.pyplot as plt
+import joblib
 
 df = pd.read_csv("labeled_trajectory.csv")
 
@@ -16,20 +21,16 @@ cmds = sorted(df["command"].unique())
 cmd_to_id = {c: i for i, c in enumerate(cmds)}
 df["cmd_id"] = df["command"].map(cmd_to_id)
 
-# ===== CREATE PREVIOUS VELOCITY FIRST =====
 df["dx_prev"] = df.groupby("segment_id")["dx"].shift(1).fillna(0)
 df["dy_prev"] = df.groupby("segment_id")["dy"].shift(1).fillna(0)
 
-# ===== INPUTS =====
 X = df[["X", "Y", "dx_prev", "dy_prev"]].values.astype("float32")
 Y = df[["dx", "dy"]].values.astype("float32")
 C = df["cmd_id"].values.astype("int64")
 
-# ===== SCALE ONLY POSITION =====
 scaler = StandardScaler()
 X[:, :2] = scaler.fit_transform(X[:, :2])
 
-# ===== SPLIT AFTER EVERYTHING IS READY =====
 X_tr, X_val, Y_tr, Y_val, C_tr, C_val = train_test_split(
     X, Y, C, test_size=0.15, random_state=42, stratify=C
 )
@@ -42,10 +43,6 @@ train_losses = []
 val_losses = []
 train_accs = []
 val_accs = []
-
-
-import torch
-import torch.nn as nn
 
 def movement_accuracy(pred, target, threshold=0.1):
     # threshold in pixels (tune this)
@@ -69,7 +66,6 @@ class Controller(nn.Module):
         emb = self.embed(cmd)
         x = torch.cat([emb, pos], dim=1)
         return self.net(x)
-from torch.utils.data import Dataset, DataLoader
 
 class ArmDataset(Dataset):
     def __init__(self, X, Y, C):
@@ -139,7 +135,6 @@ for epoch in range(1000):
 
     print(f"Epoch {epoch+1} | Train Loss {train_loss:.4f} | Val Loss {val_loss:.4f} | Train Acc {train_acc:.4f} | Val Acc {val_acc:.4f}")
 
-import matplotlib.pyplot as plt
 
 plt.figure()
 
@@ -187,8 +182,6 @@ def rollout(command, start_pos, steps=20):
     return traj
 
 
-import torch
-import joblib
 
 torch.save({
     "model": model.state_dict(),

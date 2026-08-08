@@ -1,13 +1,10 @@
 import torch
 import joblib
 import numpy as np
-
 from latefusemodel import Controller
 import serial
 import time
-
-
-
+import matplotlib.pyplot as plt
 # load
 checkpoint = torch.load("controller.pt", map_location="cpu")
 scaler = joblib.load("scaler.pkl")
@@ -79,7 +76,6 @@ for i in range(1, len(traj)):
     time.sleep(0.1)  # control speed (VERY IMPORTANT)
 
 ser.close()
-import matplotlib.pyplot as plt
 
 traj = rollout("left", [0, 0], steps=20)
 

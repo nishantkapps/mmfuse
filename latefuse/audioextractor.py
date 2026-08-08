@@ -23,9 +23,7 @@ TIME_BUFFER = 0.5
 # Whisper no_speech_prob is dropped.
 NO_SPEECH_THRESHOLD = 0.6
 
-# ─────────────────────────────────────────────
-# 1. LOAD DATA  (resume from OUTPUT_CSV if it exists)
-# ─────────────────────────────────────────────
+# Load data
 if os.path.exists(OUTPUT_CSV) and os.path.exists(PROGRESS_FILE):
     print(f"⏩  Resuming from existing output: {OUTPUT_CSV}")
     df = pd.read_csv(OUTPUT_CSV)
@@ -49,15 +47,11 @@ if os.path.exists(REVIEW_CSV):
 else:
     review_rows = []
 
-# ─────────────────────────────────────────────
-# 2. LOAD MODEL  (use "medium" unless accuracy is critical — large is slow)
-# ─────────────────────────────────────────────
+# load model
 print("Loading Whisper model…")
 model = whisper.load_model("large")
 
-# ─────────────────────────────────────────────
-# 3. COMMAND EXTRACTION  (word-level, with confidence)
-# ─────────────────────────────────────────────
+# command extraction 
 def extract_commands(result: dict) -> list[dict]:
     """
     Returns a list of dicts:
@@ -121,14 +115,12 @@ def extract_commands(result: dict) -> list[dict]:
     return deduped
 
 
-# ─────────────────────────────────────────────
-# 4. PROCESS EACH AUDIO FILE
-# ─────────────────────────────────────────────
+# PROCESS EACH AUDIO FILE
 all_files = sorted(
     f for f in os.listdir(AUDIO_FOLDER) if f.lower().endswith(".wav")
 )
 remaining = [f for f in all_files if f not in progress["done"]]
-print(f"\n📂  {len(all_files)} audio file(s) total — {len(remaining)} left to process.\n")
+print(f"\n  {len(all_files)} audio file(s) total — {len(remaining)} left to process.\n")
 
 for file in remaining:
     audio_path = os.path.join(AUDIO_FOLDER, file)
@@ -136,7 +128,7 @@ for file in remaining:
     video_mask = df["video_name"] == video_name
 
     if not video_mask.any():
-        print(f"⚠  No matching video rows for {file} — skipping")
+        print(f"No matching video rows for {file} — skipping")
         progress["done"].append(file)
         with open(PROGRESS_FILE, "w") as f:
             json.dump(progress, f, indent=2)
@@ -176,11 +168,11 @@ for file in remaining:
             n_rows = (video_mask & time_mask).sum()
 
             if n_rows == 0:
-                print(f"   ⚠  '{cmd}' [{start:.2f}s–{end:.2f}s] matched no trajectory rows")
+                print(f"'{cmd}' [{start:.2f}s–{end:.2f}s] matched no trajectory rows")
             else:
                 df.loc[video_mask & time_mask, "command"]          = cmd
                 df.loc[video_mask & time_mask, "label_confidence"] = conf
-                print(f"   ✓  '{cmd}' [{start:.2f}s–{end:.2f}s]  conf={conf:.2f}  rows={n_rows}")
+                print(f"'{cmd}' [{start:.2f}s–{end:.2f}s]  conf={conf:.2f}  rows={n_rows}")
 
             review_rows.append({
                 "file": file, "cmd": cmd,
@@ -197,17 +189,13 @@ for file in remaining:
         json.dump(progress, f, indent=2)
     print(f"   💾  Progress saved ({len(progress['done'])}/{len(all_files)} files done)")
 
-# ─────────────────────────────────────────────
-# 5. FINAL SUMMARY  (files were already saved after each audio above)
-# ─────────────────────────────────────────────
-print(f"\n✅  All done — {len(progress['done'])}/{len(all_files)} file(s) processed.")
+# final summary
+print(f"\n All done — {len(progress['done'])}/{len(all_files)} file(s) processed.")
 print(f"   Labeled dataset → {OUTPUT_CSV}")
 print(f"   Review report   → {REVIEW_CSV}")
 print(f"   Progress log    → {PROGRESS_FILE}  (delete this to restart from scratch)")
 
-# ─────────────────────────────────────────────
-# 6. QUICK LABEL SUMMARY
-# ─────────────────────────────────────────────
+#quick label summary
 print("\n── Label distribution ──────────────────")
 summary = df.groupby("command").agg(
     rows        = ("command", "count"),
@@ -217,5 +205,5 @@ print(summary.to_string())
 
 low_conf = df[(df["command"] != "idle") & (df["label_confidence"] < 0.4)]
 if len(low_conf):
-    print(f"\n⚠  {len(low_conf)} rows have confidence < 0.4 — consider reviewing or dropping them")
+    print(f"\n  {len(low_conf)} rows have confidence < 0.4 — consider reviewing or dropping them")
     print("   Filter with: df = df[df['label_confidence'] >= 0.4]")
