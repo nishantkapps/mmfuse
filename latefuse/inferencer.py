@@ -14,12 +14,8 @@ cmd_to_id = checkpoint["cmd_to_id"]
 model = Controller(num_commands=len(cmd_to_id))
 model.load_state_dict(checkpoint["model"])
 model.eval()
-
+print(cmd_to_id)
 def predict_step(command, pos, vel):
-    """
-    pos: [X, Y] (REAL pixel coords)
-    vel: [dx, dy] (previous step)
-    """
 
     cmd_id = torch.tensor([cmd_to_id[command]])
 
@@ -55,11 +51,10 @@ traj = rollout("left", [0, 0], steps=20)
 
 print(traj[:5])
 # Change COM port accordingly (Windows: COM3, Linux/Mac: /dev/ttyUSB0)
-ser = serial.Serial('COM3', 9600, timeout=1)
+#ser = serial.Serial('COM3', 9600, timeout=1)
 
-time.sleep(2)  # allow Arduino to reset
+#time.sleep(2)  # allow Arduino to reset
 
-traj = rollout("left", [0, 0], steps=20)
 
 for i in range(1, len(traj)):
     dx = traj[i][0] - traj[i-1][0]
@@ -69,13 +64,13 @@ for i in range(1, len(traj)):
     dx *= 0.05
     dy *= 0.05
     msg = f"{dx:.4f},{dy:.4f}\n"
-    ser.write(msg.encode())
+    #ser.write(msg.encode())
 
     print("Sent:", msg.strip())
 
     time.sleep(0.1)  # control speed (VERY IMPORTANT)
 
-ser.close()
+#ser.close()
 
 traj = rollout("left", [0, 0], steps=20)
 
@@ -113,7 +108,6 @@ plt.ylabel("Y Position")
 
 # Equal scaling (VERY IMPORTANT)
 plt.axis('equal')
-
 
 plt.legend()
 plt.grid(True)

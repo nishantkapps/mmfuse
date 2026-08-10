@@ -11,7 +11,7 @@ os.makedirs(audio_out, exist_ok=True)
 
 vid_counter = 1
 
-for p in range(10, 110):  # P10 → P109
+for p in range(33, 110):  # P29 → P109
     if p < 100:
         person_path = f"{base_prefix}0{p}"
     else:

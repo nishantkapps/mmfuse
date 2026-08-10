@@ -8,23 +8,23 @@ from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 import joblib
 
-df = pd.read_csv("labeled_trajectory.csv")
+df = pd.read_csv("synthetic_data.csv")
 
 df = df[df["command"] != "idle"].copy()
-df = df.sort_values(["segment_id", "t"])
-threshold = 2.0  # tune this
-
+df = df.sort_values(["id", "t"])
+threshold = 0.01  # tune this
 df = df[(abs(df["dx"]) > threshold) | (abs(df["dy"]) > threshold)]
+print(df)
 
 # Command mapping
 cmds = sorted(df["command"].unique())
 cmd_to_id = {c: i for i, c in enumerate(cmds)}
 df["cmd_id"] = df["command"].map(cmd_to_id)
-
-df["dx_prev"] = df.groupby("segment_id")["dx"].shift(1).fillna(0)
-df["dy_prev"] = df.groupby("segment_id")["dy"].shift(1).fillna(0)
+df["dx_prev"] = df.groupby("id")["dx"].shift(1).fillna(0)
+df["dy_prev"] = df.groupby("id")["dy"].shift(1).fillna(0)
 
 X = df[["X", "Y", "dx_prev", "dy_prev"]].values.astype("float32")
+
 Y = df[["dx", "dy"]].values.astype("float32")
 C = df["cmd_id"].values.astype("int64")
 
@@ -34,9 +34,9 @@ X[:, :2] = scaler.fit_transform(X[:, :2])
 X_tr, X_val, Y_tr, Y_val, C_tr, C_val = train_test_split(
     X, Y, C, test_size=0.15, random_state=42, stratify=C
 )
-df["dx_prev"] = df.groupby("segment_id")["dx"].shift(1).fillna(0)
-df["dy_prev"] = df.groupby("segment_id")["dy"].shift(1).fillna(0)
-
+df["dx_prev"] = df.groupby("id")["dx"].shift(1).fillna(0)
+df["dy_prev"] = df.groupby("id")["dy"].shift(1).fillna(0)
+print(df.groupby("command")[["dx", "dy"]].agg(["count", "mean", "std"]))
 X = df[["X", "Y", "dx_prev", "dy_prev"]].values.astype("float32")
 
 train_losses = []
@@ -89,7 +89,7 @@ model = Controller(num_commands=len(cmd_to_id)).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 loss_fn = nn.HuberLoss()
 
-for epoch in range(1000):
+for epoch in range(100):
     model.train()
     train_loss = 0
     train_acc = 0
@@ -198,3 +198,12 @@ for cmd in df["command"].unique():
 plt.legend()
 plt.title("dx/dy distribution by command")
 plt.show()
+
+for cmd in ["left", "right"]:
+    subset = df[df["command"] == cmd]
+
+    plt.figure()
+    plt.plot(subset["X"], subset["Y"], ".-")
+    plt.title(cmd)
+    plt.axis("equal")
+    plt.show()
