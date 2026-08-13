@@ -7,14 +7,14 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 import joblib
-
+ 
 df = pd.read_csv("synthetic_data.csv")
 
 df = df[df["command"] != "idle"].copy()
 df = df.sort_values(["id", "t"])
 threshold = 0.01  # tune this
 df = df[(abs(df["dx"]) > threshold) | (abs(df["dy"]) > threshold)]
-print(df)
+#print(df)
 
 # Command mapping
 cmds = sorted(df["command"].unique())
@@ -55,7 +55,7 @@ class Controller(nn.Module):
         self.embed = nn.Embedding(num_commands, 16)
 
         self.net = nn.Sequential(
-            nn.Linear(16 + 4, 64),  # ← changed from 2 → 4
+            nn.Linear(16 + 4, 64),  
             nn.ReLU(),
             nn.Linear(64, 64),
             nn.ReLU(),
@@ -89,63 +89,78 @@ model = Controller(num_commands=len(cmd_to_id)).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 loss_fn = nn.HuberLoss()
 
-for epoch in range(100):
-    model.train()
-    train_loss = 0
-    train_acc = 0
+def train():
+    for epoch in range(100):
+        model.train()
+        train_loss = 0
+        train_acc = 0
 
-    for cmd, pos, target in train_loader:
-        cmd, pos, target = cmd.to(device), pos.to(device), target.to(device)
-
-        pred = model(cmd, pos)
-        loss = loss_fn(pred, target)
-
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-
-        train_loss += loss.item() * len(cmd)
-        train_acc += movement_accuracy(pred, target) * len(cmd)
-
-    train_loss /= len(train_loader.dataset)
-    train_acc /= len(train_loader.dataset)
-
-    # validation
-    model.eval()
-    val_loss = 0
-    val_acc = 0
-
-    with torch.no_grad():
-        for cmd, pos, target in val_loader:
+        for cmd, pos, target in train_loader:
             cmd, pos, target = cmd.to(device), pos.to(device), target.to(device)
 
             pred = model(cmd, pos)
-            val_loss += loss_fn(pred, target).item() * len(cmd)
-            val_acc += movement_accuracy(pred, target) * len(cmd)
+            loss = loss_fn(pred, target)
 
-    val_loss /= len(val_loader.dataset)
-    val_acc /= len(val_loader.dataset)
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
 
-    # store
-    train_losses.append(train_loss)
-    val_losses.append(val_loss)
-    train_accs.append(train_acc)
-    val_accs.append(val_acc)
+            train_loss += loss.item() * len(cmd)
+            train_acc += movement_accuracy(pred, target) * len(cmd)
 
-    print(f"Epoch {epoch+1} | Train Loss {train_loss:.4f} | Val Loss {val_loss:.4f} | Train Acc {train_acc:.4f} | Val Acc {val_acc:.4f}")
+        train_loss /= len(train_loader.dataset)
+        train_acc /= len(train_loader.dataset)
+
+        model.eval()
+        val_loss = 0
+        val_acc = 0
+
+        with torch.no_grad():
+            for cmd, pos, target in val_loader:
+                cmd, pos, target = cmd.to(device), pos.to(device), target.to(device)
+
+                pred = model(cmd, pos)
+                val_loss += loss_fn(pred, target).item() * len(cmd)
+                val_acc += movement_accuracy(pred, target) * len(cmd)
+
+        val_loss /= len(val_loader.dataset)
+        val_acc /= len(val_loader.dataset)
+
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        train_accs.append(train_acc)
+        val_accs.append(val_acc)
+
+        print(f"Epoch {epoch+1} | Train Loss {train_loss:.4f} | Val Loss {val_loss:.4f} | Train Acc {train_acc:.4f} | Val Acc {val_acc:.4f}")
+
+def analysis():
+    plt.figure()
+
+    plt.plot(train_losses, label="Train Loss")
+    plt.plot(val_losses, label="Val Loss")
 
 
-plt.figure()
+    plt.xlabel("Epoch")
+    plt.title("Loss and Accuracy")
+    plt.legend()
+    plt.show()
+    for cmd in df["command"].unique():
+        subset = df[df["command"] == cmd]
+        plt.scatter(subset["dx"], subset["dy"], label=cmd, alpha=0.3)
 
-plt.plot(train_losses, label="Train Loss")
-plt.plot(val_losses, label="Val Loss")
+    plt.legend()
+    plt.title("dx/dy distribution by command")
+    plt.show()
 
+    for cmd in ["left", "right"]:
+        subset = df[df["command"] == cmd]
 
-plt.xlabel("Epoch")
-plt.title("Loss and Accuracy")
-plt.legend()
-plt.show()
+        plt.figure()
+        plt.plot(subset["X"], subset["Y"], ".-")
+        plt.title(cmd)
+        plt.axis("equal")
+        plt.show()
 
 def rollout(command, start_pos, steps=20):
     model.eval()
@@ -169,8 +184,6 @@ def rollout(command, start_pos, steps=20):
             dxdy = model(cmd_id, inp)
             dxdy_scaled = dxdy / scaler.scale_[:2]
 
-
-        # update position + velocity
         pos = pos + dxdy_scaled
         vel = dxdy_scaled
 
@@ -181,6 +194,8 @@ def rollout(command, start_pos, steps=20):
 
     return traj
 
+if __name__ == "main":
+    train()
 
 
 torch.save({
@@ -190,20 +205,3 @@ torch.save({
 
 joblib.dump(scaler, "scaler.pkl")
 
-
-for cmd in df["command"].unique():
-    subset = df[df["command"] == cmd]
-    plt.scatter(subset["dx"], subset["dy"], label=cmd, alpha=0.3)
-
-plt.legend()
-plt.title("dx/dy distribution by command")
-plt.show()
-
-for cmd in ["left", "right"]:
-    subset = df[df["command"] == cmd]
-
-    plt.figure()
-    plt.plot(subset["X"], subset["Y"], ".-")
-    plt.title(cmd)
-    plt.axis("equal")
-    plt.show()
