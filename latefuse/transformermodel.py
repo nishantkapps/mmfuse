@@ -12,8 +12,6 @@ df = pd.read_csv("synthetic_data.csv")
 
 df = df[df["command"] != "idle"].copy()
 df = df.sort_values(["id", "t"])
-threshold = 0.01  # tune this
-df = df[(abs(df["dx"]) > threshold) | (abs(df["dy"]) > threshold)]
 #print(df)
 
 # Command mapping
@@ -47,7 +45,7 @@ class TrajectoryDataset(Dataset):
 
             for i in range(
                 history_length,
-                len(group) - future_steps
+                len(group) - future_steps + 1
             ):
 
                 # Past 10 states
@@ -81,14 +79,28 @@ class TrajectoryDataset(Dataset):
 
 ids = df["id"].unique()
 
-train_ids, val_ids = train_test_split(
+train_ids, temp_ids = train_test_split(
     ids,
-    test_size=0.15,
+    test_size=0.30,
+    random_state=42
+)
+
+val_ids, test_ids = train_test_split(
+    temp_ids,
+    test_size=0.50,
     random_state=42
 )
 
 train_df = df[df["id"].isin(train_ids)].copy()
-val_df = df[df["id"].isin(val_ids)].copy()
+val_df   = df[df["id"].isin(val_ids)].copy()
+test_df  = df[df["id"].isin(test_ids)].copy()
+
+print(
+    f"Trajectories: "
+    f"train={len(train_ids)}, "
+    f"val={len(val_ids)}, "
+    f"test={len(test_ids)}"
+)
 pos_scaler = StandardScaler()
 vel_scaler = StandardScaler()
 
@@ -190,6 +202,18 @@ val_loader = DataLoader(
     batch_size=64,
     shuffle=False
 )
+
+test_dataset = TrajectoryDataset(
+    test_df,
+    history_length,
+    future_steps
+)
+
+test_loader = DataLoader(
+    test_dataset,
+    batch_size=64,
+    shuffle=False
+)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = TrajectoryTransformer(
     num_commands=len(cmd_to_id),
@@ -203,8 +227,18 @@ optimizer = torch.optim.AdamW(
 loss_fn = nn.HuberLoss()
 
 def train():
-    for epoch in range(100):
 
+    max_epochs = 100
+    patience = 10
+
+    best_val_loss = float("inf")
+    epochs_without_improvement = 0
+
+    for epoch in range(max_epochs):
+
+        # -------------------------
+        # TRAIN
+        # -------------------------
         model.train()
 
         train_loss = 0.0
@@ -232,6 +266,9 @@ def train():
 
         train_loss /= len(train_loader.dataset)
 
+        # -------------------------
+        # VALIDATION
+        # -------------------------
         model.eval()
 
         val_loss = 0.0
@@ -256,10 +293,120 @@ def train():
         val_losses.append(val_loss)
 
         print(
-            f"Epoch {epoch+1} | "
+            f"Epoch {epoch+1:3d} | "
             f"Train Loss {train_loss:.4f} | "
             f"Val Loss {val_loss:.4f}"
         )
+
+        # -------------------------
+        # SAVE BEST MODEL
+        # -------------------------
+        if val_loss < best_val_loss:
+
+            best_val_loss = val_loss
+            epochs_without_improvement = 0
+
+            torch.save(
+                model.state_dict(),
+                "best_trajectory_transformer.pt"
+            )
+
+        else:
+            epochs_without_improvement += 1
+
+        # -------------------------
+        # EARLY STOPPING
+        # -------------------------
+        if epochs_without_improvement >= patience:
+
+            print(
+                f"\nEarly stopping at epoch {epoch+1}"
+            )
+
+            break
+
+    # Load best validation model
+    model.load_state_dict(
+        torch.load(
+            "best_trajectory_transformer.pt",
+            map_location=device
+        )
+    )
+
+    print(
+        f"\nBest validation loss: "
+        f"{best_val_loss:.4f}"
+    )
+
+def evaluate_trajectory(loader):
+
+    model.eval()
+
+    total_ade = 0.0
+    total_fde = 0.0
+    total_samples = 0
+
+    with torch.no_grad():
+
+        for cmd, history, target in loader:
+
+            cmd = cmd.to(device)
+            history = history.to(device)
+            target = target.to(device)
+
+            pred = model(cmd, history)
+
+            # Convert velocity predictions to positions
+            # Both are currently in scaled velocity units,
+            # so first convert velocity differences back to
+            # physical units.
+
+            pred_np = pred.cpu().numpy()
+            target_np = target.cpu().numpy()
+
+            pred_vel = vel_scaler.inverse_transform(
+                pred_np.reshape(-1, 2)
+            ).reshape(pred_np.shape)
+
+            target_vel = vel_scaler.inverse_transform(
+                target_np.reshape(-1, 2)
+            ).reshape(target_np.shape)
+
+            # Starting position is the final history position
+            history_np = history.cpu().numpy()
+
+            start_pos_scaled = history_np[:, -1, :2]
+
+            start_pos = pos_scaler.inverse_transform(
+                start_pos_scaled
+            )
+
+            pred_pos = (
+                start_pos[:, None, :]
+                + np.cumsum(pred_vel, axis=1)
+            )
+
+            target_pos = (
+                start_pos[:, None, :]
+                + np.cumsum(target_vel, axis=1)
+            )
+
+            distances = np.linalg.norm(
+                pred_pos - target_pos,
+                axis=2
+            )
+
+            ade = distances.mean(axis=1)
+            fde = distances[:, -1]
+
+            total_ade += ade.sum()
+            total_fde += fde.sum()
+            total_samples += len(cmd)
+
+    return (
+        total_ade / total_samples,
+        total_fde / total_samples
+    )
 def analysis():
     plt.figure()
 
@@ -330,20 +477,25 @@ def predict_trajectory(command, history):
 
 if __name__ == "__main__":
     train()
+    test_ade, test_fde = evaluate_trajectory(test_loader)
+
+    print("\n── Test Results ──────────────────")
+    print(f"ADE: {test_ade:.4f}")
+    print(f"FDE: {test_fde:.4f}")
 
 
-torch.save({
+    torch.save({
     "model": model.state_dict(),
     "cmd_to_id": cmd_to_id,
     "history_length": history_length,
     "future_steps": future_steps
-}, "trajectory_transformer.pt")
+    }, "trajectory_transformer.pt")
 
-joblib.dump(
+    joblib.dump(
     {
         "pos_scaler": pos_scaler,
         "vel_scaler": vel_scaler
     },
     "scalers.pkl"
-)
+    )
 
